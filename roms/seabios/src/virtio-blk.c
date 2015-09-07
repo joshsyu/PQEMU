@@ -13,7 +13,7 @@
 #include "biosvar.h" // GET_GLOBAL
 #include "pci_ids.h" // PCI_DEVICE_ID_VIRTIO_BLK
 #include "pci_regs.h" // PCI_VENDOR_ID
-#include "boot.h" // boot_add_hd
+#include "boot.h" // add_bcv_internal
 #include "virtio-pci.h"
 #include "virtio-ring.h"
 #include "virtio-blk.h"
@@ -39,16 +39,16 @@ virtio_blk_op(struct disk_op_s *op, int write)
     u8 status = VIRTIO_BLK_S_UNSUPP;
     struct vring_list sg[] = {
         {
-            .addr       = MAKE_FLATPTR(GET_SEG(SS), &hdr),
-            .length     = sizeof(hdr),
+            .addr	= MAKE_FLATPTR(GET_SEG(SS), &hdr),
+            .length	= sizeof(hdr),
         },
         {
-            .addr       = op->buf_fl,
-            .length     = GET_GLOBAL(vdrive_g->drive.blksize) * op->count,
+            .addr	= op->buf_fl,
+            .length	= GET_GLOBAL(vdrive_g->drive.blksize) * op->count,
         },
         {
-            .addr       = MAKE_FLATPTR(GET_SEG(SS), &status),
-            .length     = sizeof(status),
+            .addr	= MAKE_FLATPTR(GET_SEG(SS), &status),
+            .length	= sizeof(status),
         },
     };
 
@@ -75,7 +75,7 @@ virtio_blk_op(struct disk_op_s *op, int write)
 }
 
 int
-process_virtio_blk_op(struct disk_op_s *op)
+process_virtio_op(struct disk_op_s *op)
 {
     if (! CONFIG_VIRTIO_BLK || CONFIG_COREBOOT)
         return 0;
@@ -97,23 +97,33 @@ process_virtio_blk_op(struct disk_op_s *op)
 }
 
 static void
-init_virtio_blk(struct pci_device *pci)
+init_virtio_blk(u16 bdf)
 {
-    u16 bdf = pci->bdf;
     dprintf(1, "found virtio-blk at %x:%x\n", pci_bdf_to_bus(bdf),
             pci_bdf_to_dev(bdf));
+    char *desc = malloc_tmphigh(MAXDESCSIZE);
     struct virtiodrive_s *vdrive_g = malloc_fseg(sizeof(*vdrive_g));
-    if (!vdrive_g) {
+    struct vring_virtqueue *vq = memalign_low(PAGE_SIZE, sizeof(*vq));
+    if (!vdrive_g || !desc || !vq) {
         warn_noalloc();
-        return;
+        goto fail;
     }
     memset(vdrive_g, 0, sizeof(*vdrive_g));
-    vdrive_g->drive.type = DTYPE_VIRTIO_BLK;
+    memset(vq, 0, sizeof(*vq));
+    vdrive_g->drive.type = DTYPE_VIRTIO;
     vdrive_g->drive.cntl_id = bdf;
+    vdrive_g->vq = vq;
 
-    u16 ioaddr = vp_init_simple(bdf);
+    u16 ioaddr = pci_config_readl(bdf, PCI_BASE_ADDRESS_0) &
+        PCI_BASE_ADDRESS_IO_MASK;
+
     vdrive_g->ioaddr = ioaddr;
-    if (vp_find_vq(ioaddr, 0, &vdrive_g->vq) < 0 ) {
+
+    vp_reset(ioaddr);
+    vp_set_status(ioaddr, VIRTIO_CONFIG_S_ACKNOWLEDGE |
+                  VIRTIO_CONFIG_S_DRIVER );
+
+    if (vp_find_vq(ioaddr, 0, vdrive_g->vq) < 0 ) {
         dprintf(1, "fail to find vq for virtio-blk %x:%x\n",
                 pci_bdf_to_bus(bdf), pci_bdf_to_dev(bdf));
         goto fail;
@@ -141,18 +151,23 @@ init_virtio_blk(struct pci_device *pci)
     vdrive_g->drive.pchs.cylinders = cfg.cylinders;
     vdrive_g->drive.pchs.heads = cfg.heads;
     vdrive_g->drive.pchs.spt = cfg.sectors;
-    char *desc = znprintf(MAXDESCSIZE, "Virtio disk PCI:%x:%x",
-                          pci_bdf_to_bus(bdf), pci_bdf_to_dev(bdf));
 
-    boot_add_hd(&vdrive_g->drive, desc, bootprio_find_pci_device(pci));
+    setup_translation(&vdrive_g->drive);
+    add_bcv_internal(&vdrive_g->drive);
+
+    snprintf(desc, MAXDESCSIZE, "Virtio disk PCI:%x:%x",
+             pci_bdf_to_bus(bdf), pci_bdf_to_dev(bdf));
+
+    vdrive_g->drive.desc = desc;
 
     vp_set_status(ioaddr, VIRTIO_CONFIG_S_ACKNOWLEDGE |
                   VIRTIO_CONFIG_S_DRIVER | VIRTIO_CONFIG_S_DRIVER_OK);
     return;
 
 fail:
-    free(vdrive_g->vq);
     free(vdrive_g);
+    free(desc);
+    free(vq);
 }
 
 void
@@ -164,11 +179,12 @@ virtio_blk_setup(void)
 
     dprintf(3, "init virtio-blk\n");
 
-    struct pci_device *pci;
-    foreachpci(pci) {
-        if (pci->vendor != PCI_VENDOR_ID_REDHAT_QUMRANET
-            || pci->device != PCI_DEVICE_ID_VIRTIO_BLK)
+    int bdf, max;
+    u32 id = PCI_VENDOR_ID_REDHAT_QUMRANET | (PCI_DEVICE_ID_VIRTIO_BLK << 16);
+    foreachpci(bdf, max) {
+        u32 v = pci_config_readl(bdf, PCI_VENDOR_ID);
+        if (v != id)
             continue;
-        init_virtio_blk(pci);
+        init_virtio_blk(bdf);
     }
 }

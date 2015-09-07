@@ -29,36 +29,32 @@
 #include <signal.h>
 #include "osdep.h"
 #include "qemu-queue.h"
-#include "hwaddr.h"
-#include "qemu-thread.h"
+#include "targphys.h"
+
 #ifndef TARGET_LONG_BITS
 #error TARGET_LONG_BITS must be defined before including this header
 #endif
 
 #define TARGET_LONG_SIZE (TARGET_LONG_BITS / 8)
 
-typedef int16_t target_short __attribute__ ((aligned(TARGET_SHORT_ALIGNMENT)));
-typedef uint16_t target_ushort __attribute__((aligned(TARGET_SHORT_ALIGNMENT)));
-typedef int32_t target_int __attribute__((aligned(TARGET_INT_ALIGNMENT)));
-typedef uint32_t target_uint __attribute__((aligned(TARGET_INT_ALIGNMENT)));
-typedef int64_t target_llong __attribute__((aligned(TARGET_LLONG_ALIGNMENT)));
-typedef uint64_t target_ullong __attribute__((aligned(TARGET_LLONG_ALIGNMENT)));
 /* target_ulong is the type of a virtual address */
 #if TARGET_LONG_SIZE == 4
-typedef int32_t target_long __attribute__((aligned(TARGET_LONG_ALIGNMENT)));
-typedef uint32_t target_ulong __attribute__((aligned(TARGET_LONG_ALIGNMENT)));
+typedef int32_t target_long;
+typedef uint32_t target_ulong;
 #define TARGET_FMT_lx "%08x"
 #define TARGET_FMT_ld "%d"
 #define TARGET_FMT_lu "%u"
 #elif TARGET_LONG_SIZE == 8
-typedef int64_t target_long __attribute__((aligned(TARGET_LONG_ALIGNMENT)));
-typedef uint64_t target_ulong __attribute__((aligned(TARGET_LONG_ALIGNMENT)));
+typedef int64_t target_long;
+typedef uint64_t target_ulong;
 #define TARGET_FMT_lx "%016" PRIx64
 #define TARGET_FMT_ld "%" PRId64
 #define TARGET_FMT_lu "%" PRIu64
 #else
 #error TARGET_LONG_SIZE undefined
 #endif
+
+#define HOST_LONG_SIZE (HOST_LONG_BITS / 8)
 
 #define EXCP_INTERRUPT 	0x10000 /* async interruption */
 #define EXCP_HLT        0x10001 /* hlt instruction reached */
@@ -98,12 +94,12 @@ typedef struct CPUTLBEntry {
     target_ulong addr_code;
     /* Addend to virtual address to get host address.  IO accesses
        use the corresponding iotlb value.  */
-    uintptr_t addend;
+    unsigned long addend;
     /* padding to get a power of two size */
-    uint8_t dummy[(1 << CPU_TLB_ENTRY_BITS) -
-                  (sizeof(target_ulong) * 3 +
-                   ((-sizeof(target_ulong) * 3) & (sizeof(uintptr_t) - 1)) +
-                   sizeof(uintptr_t))];
+    uint8_t dummy[(1 << CPU_TLB_ENTRY_BITS) - 
+                  (sizeof(target_ulong) * 3 + 
+                   ((-sizeof(target_ulong) * 3) & (sizeof(unsigned long) - 1)) + 
+                   sizeof(unsigned long))];
 } CPUTLBEntry;
 
 extern int CPUTLBEntry_wrong_size[sizeof(CPUTLBEntry) == (1 << CPU_TLB_ENTRY_BITS) ? 1 : -1];
@@ -111,7 +107,7 @@ extern int CPUTLBEntry_wrong_size[sizeof(CPUTLBEntry) == (1 << CPU_TLB_ENTRY_BIT
 #define CPU_COMMON_TLB \
     /* The meaning of the MMU modes is defined in the target code. */   \
     CPUTLBEntry tlb_table[NB_MMU_MODES][CPU_TLB_SIZE];                  \
-    hwaddr iotlb[NB_MMU_MODES][CPU_TLB_SIZE];               \
+    target_phys_addr_t iotlb[NB_MMU_MODES][CPU_TLB_SIZE];               \
     target_ulong tlb_flush_addr;                                        \
     target_ulong tlb_flush_mask;
 
@@ -120,6 +116,31 @@ extern int CPUTLBEntry_wrong_size[sizeof(CPUTLBEntry) == (1 << CPU_TLB_ENTRY_BIT
 #define CPU_COMMON_TLB
 
 #endif
+
+#ifdef CONFIG_PVC
+#include "qemu-thread.h"
+#define PVC_COMMON							\
+    int pvc_sched;							\
+    QemuMutex pvc_sched_mutex;						\
+    QemuMutex pvc_mutex;						\
+    QemuMutex pvc_fair_mutex; \
+    QemuMutex pvc_timer_mutex; \
+    QemuMutex pvc_interrupt_mutex;
+#else
+
+#define PVC_COMMON
+
+#endif
+
+#ifdef CONFIG_PVC_SCC
+#define PVC_SCC 							\
+    struct TranslationBlock **pvc_tb_phys_hash;
+#else
+
+#define PVC_SCC
+
+#endif
+
 
 
 #ifdef HOST_WORDS_BIGENDIAN
@@ -158,8 +179,8 @@ typedef struct CPUWatchpoint {
     /* in order to avoid passing too many arguments to the MMIO         \
        helpers, we store some rarely used information in the CPU        \
        context) */                                                      \
-    uintptr_t mem_io_pc; /* host pc at which the memory was             \
-                            accessed */                                 \
+    unsigned long mem_io_pc; /* host pc at which the memory was         \
+                                accessed */                             \
     target_ulong mem_io_vaddr; /* target virtual addr at which the      \
                                      memory was accessed */             \
     uint32_t halted; /* Nonzero if the CPU is in suspend state */       \
@@ -194,7 +215,7 @@ typedef struct CPUWatchpoint {
     jmp_buf jmp_env;                                                    \
     int exception_index;                                                \
                                                                         \
-    CPUArchState *next_cpu; /* next CPU sharing TB cache */                 \
+    CPUState *next_cpu; /* next CPU sharing TB cache */                 \
     int cpu_index; /* CPU index (informative) */                        \
     uint32_t host_tid; /* host thread ID */                             \
     int numa_node; /* NUMA node this cpu is belonging to  */            \
@@ -204,16 +225,18 @@ typedef struct CPUWatchpoint {
     /* user data */                                                     \
     void *opaque;                                                       \
                                                                         \
+    uint32_t created;                                                   \
+    uint32_t stop;   /* Stop request */                                 \
+    uint32_t stopped; /* Artificially stopped */                        \
+    struct QemuThread *thread;                                          \
+    struct QemuCond *halt_cond;                                         \
+    PVC_COMMON								\
+    PVC_SCC								\
+    struct qemu_work_item *queued_work_first, *queued_work_last;        \
     const char *cpu_model_str;                                          \
     struct KVMState *kvm_state;                                         \
     struct kvm_run *kvm_run;                                            \
-    int kvm_fd;                                                  
-/*#define CPU_THREAD
-    //int wait_io_flag;
-    //`volatile int unlink_flag;
-    QemuMutex qemu_global_mutex2;
-    QemuMutex qemu_fair_mutex2;
-    QemuCond qemu_cpu_cond2;
-    QemuCond qemu_pause_cond2;
-*/
+    int kvm_fd;                                                         \
+    int kvm_vcpu_dirty;
+
 #endif

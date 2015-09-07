@@ -1,5 +1,8 @@
 #include "def-helper.h"
 
+DEF_HELPER_0(pvc_atomic_lock, void)
+DEF_HELPER_0(pvc_atomic_unlock, void)
+
 DEF_HELPER_1(clz, i32, i32)
 DEF_HELPER_1(sxtb16, i32, i32)
 DEF_HELPER_1(uxtb16, i32, i32)
@@ -58,18 +61,6 @@ DEF_HELPER_0(cpsr_read, i32)
 
 DEF_HELPER_3(v7m_msr, void, env, i32, i32)
 DEF_HELPER_2(v7m_mrs, i32, env, i32)
-
-#ifdef CONFIG_CPUTHREAD
-DEF_HELPER_1(clear_global_monitor, void, env)
-DEF_HELPER_1(update_global_monitor, void, env)
-DEF_HELPER_1(update_global_monitor_with_addr, void, i32)
-#endif
-
-#if defined(CONFIG_EVENT_COUNT) || defined(CONFIG_RDTSC_COUNT)
-DEF_HELPER_1(profiling_start, void, env)
-DEF_HELPER_1(profiling_wait, void, env)
-DEF_HELPER_1(profiling_end, void, env)
-#endif
 
 DEF_HELPER_3(set_cp15, void, env, i32, i32)
 DEF_HELPER_2(get_cp15, i32, env, i32)
@@ -149,10 +140,6 @@ DEF_HELPER_2(rsqrte_f32, f32, f32, env)
 DEF_HELPER_2(recpe_u32, i32, i32, env)
 DEF_HELPER_2(rsqrte_u32, i32, i32, env)
 DEF_HELPER_4(neon_tbl, i32, i32, i32, i32, i32)
-DEF_HELPER_2(neon_add_saturate_u64, i64, i64, i64)
-DEF_HELPER_2(neon_add_saturate_s64, i64, i64, i64)
-DEF_HELPER_2(neon_sub_saturate_u64, i64, i64, i64)
-DEF_HELPER_2(neon_sub_saturate_s64, i64, i64, i64)
 
 DEF_HELPER_2(add_cc, i32, i32, i32)
 DEF_HELPER_2(adc_cc, i32, i32, i32)
@@ -172,10 +159,18 @@ DEF_HELPER_3(neon_qadd_u8, i32, env, i32, i32)
 DEF_HELPER_3(neon_qadd_s8, i32, env, i32, i32)
 DEF_HELPER_3(neon_qadd_u16, i32, env, i32, i32)
 DEF_HELPER_3(neon_qadd_s16, i32, env, i32, i32)
+DEF_HELPER_3(neon_qadd_u32, i32, env, i32, i32)
+DEF_HELPER_3(neon_qadd_s32, i32, env, i32, i32)
 DEF_HELPER_3(neon_qsub_u8, i32, env, i32, i32)
 DEF_HELPER_3(neon_qsub_s8, i32, env, i32, i32)
 DEF_HELPER_3(neon_qsub_u16, i32, env, i32, i32)
 DEF_HELPER_3(neon_qsub_s16, i32, env, i32, i32)
+DEF_HELPER_3(neon_qsub_u32, i32, env, i32, i32)
+DEF_HELPER_3(neon_qsub_s32, i32, env, i32, i32)
+DEF_HELPER_3(neon_qadd_u64, i64, env, i64, i64)
+DEF_HELPER_3(neon_qadd_s64, i64, env, i64, i64)
+DEF_HELPER_3(neon_qsub_u64, i64, env, i64, i64)
+DEF_HELPER_3(neon_qsub_s64, i64, env, i64, i64)
 
 DEF_HELPER_2(neon_hadd_s8, i32, i32, i32)
 DEF_HELPER_2(neon_hadd_u8, i32, i32, i32)
@@ -261,6 +256,10 @@ DEF_HELPER_3(neon_qshl_u32, i32, env, i32, i32)
 DEF_HELPER_3(neon_qshl_s32, i32, env, i32, i32)
 DEF_HELPER_3(neon_qshl_u64, i64, env, i64, i64)
 DEF_HELPER_3(neon_qshl_s64, i64, env, i64, i64)
+DEF_HELPER_3(neon_qshlu_s8, i32, env, i32, i32);
+DEF_HELPER_3(neon_qshlu_s16, i32, env, i32, i32);
+DEF_HELPER_3(neon_qshlu_s32, i32, env, i32, i32);
+DEF_HELPER_3(neon_qshlu_s64, i64, env, i64, i64);
 DEF_HELPER_3(neon_qrshl_u8, i32, env, i32, i32)
 DEF_HELPER_3(neon_qrshl_s8, i32, env, i32, i32)
 DEF_HELPER_3(neon_qrshl_u16, i32, env, i32, i32)

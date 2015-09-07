@@ -5,9 +5,7 @@
 // This file may be distributed under the terms of the GNU LGPLv3 license.
 
 #include "util.h" // dprintf
-#include "config.h" // CONFIG_*
-#include "xen.h" // usingXen
-#include "pci.h" // pcimem_start
+#include "biosvar.h" // GET_EBDA
 
 #define MSR_MTRRcap                    0x000000fe
 #define MSR_MTRRfix64K_00000           0x00000250
@@ -34,7 +32,7 @@
 
 void mtrr_setup(void)
 {
-    if (!CONFIG_MTRR_INIT || CONFIG_COREBOOT || usingXen())
+    if (CONFIG_COREBOOT)
         return;
 
     u32 eax, ebx, ecx, edx, cpuid_features;
@@ -85,9 +83,9 @@ void mtrr_setup(void)
     int phys_bits = 36;
     cpuid(0x80000000u, &eax, &ebx, &ecx, &edx);
     if (eax >= 0x80000008) {
-        /* Get physical bits from leaf 0x80000008 (if available) */
-        cpuid(0x80000008u, &eax, &ebx, &ecx, &edx);
-        phys_bits = eax & 0xff;
+            /* Get physical bits from leaf 0x80000008 (if available) */
+            cpuid(0x80000008u, &eax, &ebx, &ecx, &edx);
+            phys_bits = eax & 0xff;
     }
     u64 phys_mask = ((1ull << phys_bits) - 1);
     for (i=0; i<vcnt; i++) {
@@ -95,9 +93,9 @@ void mtrr_setup(void)
         wrmsr_smp(MTRRphysMask_MSR(i), 0);
     }
     /* Mark 3.5-4GB as UC, anything not specified defaults to WB */
-    wrmsr_smp(MTRRphysBase_MSR(0), pcimem_start | MTRR_MEMTYPE_UC);
+    wrmsr_smp(MTRRphysBase_MSR(0), BUILD_MAX_HIGHMEM | MTRR_MEMTYPE_UC);
     wrmsr_smp(MTRRphysMask_MSR(0)
-              , (-((1ull<<32)-pcimem_start) & phys_mask) | 0x800);
+              , (-((1ull<<32)-BUILD_MAX_HIGHMEM) & phys_mask) | 0x800);
 
     // Enable fixed and variable MTRRs; set default type.
     wrmsr_smp(MSR_MTRRdefType, 0xc00 | MTRR_MEMTYPE_WB);

@@ -1,1 +1,1 @@
-/home/josh/Downloads/qemu-1.3.1/Makefile.dis
+/home/josh/sdb2/PQEMU/Makefile.dis

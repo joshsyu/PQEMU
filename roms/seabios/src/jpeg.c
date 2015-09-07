@@ -394,19 +394,16 @@ void jpeg_get_size(struct jpeg_decdata *jpeg, int *width, int *height)
     *height = jpeg->height;
 }
 
-int jpeg_show(struct jpeg_decdata *jpeg, unsigned char *pic, int width
-              , int height, int depth, int bytes_per_line_dest)
+int jpeg_show(struct jpeg_decdata *jpeg, unsigned char *pic
+              , int width, int height, int depth)
 {
-    int m, mcusx, mcusy, mx, my, mloffset, jpgbpl;
+    int m, mcusx, mcusy, mx, my;
     int max[6];
 
     if (jpeg->height != height)
         return ERR_HEIGHT_MISMATCH;
     if (jpeg->width != width)
         return ERR_WIDTH_MISMATCH;
-
-    jpgbpl = width * depth / 8;
-    mloffset = bytes_per_line_dest > jpgbpl ? bytes_per_line_dest : jpgbpl;
 
     mcusx = jpeg->width >> 4;
     mcusy = jpeg->height >> 4;
@@ -437,18 +434,18 @@ int jpeg_show(struct jpeg_decdata *jpeg, unsigned char *pic, int width
             switch (depth) {
             case 32:
                 col221111_32(jpeg->out,
-                             pic + (my * 16 * mloffset + mx * 16 * 4),
-                             mloffset);
+                             pic + (my * 16 * mcusx + mx) * 16 * 4,
+                             mcusx * 16 * 4);
                 break;
             case 24:
                 col221111(jpeg->out,
-                          pic + (my * 16 * mloffset + mx * 16 * 3),
-                          mloffset);
+                          pic + (my * 16 * mcusx + mx) * 16 * 3,
+                          mcusx * 16 * 3);
                 break;
             case 16:
                 col221111_16(jpeg->out,
-                             pic + (my * 16 * mloffset + mx * 16 * 2),
-                             mloffset);
+                             pic + (my * 16 * mcusx + mx) * (16 * 2),
+                             mcusx * (16 * 2));
                 break;
             default:
                 return ERR_DEPTH_MISMATCH;
@@ -890,15 +887,6 @@ static void initcol(PREC q[][64])
 
 #endif
 
-#ifdef __LITTLE_ENDIAN
-#define PIC(yin, xin, p, xout)                   \
-(                                                \
-  y = outy[(yin) * 8 + xin],                     \
-  STORECLAMP(p[(xout) * 3 + 2], y + cr),         \
-  STORECLAMP(p[(xout) * 3 + 1], y - cg),         \
-  STORECLAMP(p[(xout) * 3 + 0], y + cb)          \
-)
-#else
 #define PIC(yin, xin, p, xout)                   \
 (                                                \
   y = outy[(yin) * 8 + xin],                     \
@@ -906,7 +894,6 @@ static void initcol(PREC q[][64])
   STORECLAMP(p[(xout) * 3 + 1], y - cg),         \
   STORECLAMP(p[(xout) * 3 + 2], y + cb)          \
 )
-#endif
 
 #ifdef __LITTLE_ENDIAN
 #define PIC_16(yin, xin, p, xout, add)           \

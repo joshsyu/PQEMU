@@ -9,13 +9,10 @@
 #include "disk.h" // DISK_RET_SUCCESS
 #include "config.h" // CONFIG_FLOPPY
 #include "biosvar.h" // SET_BDA
-#include "util.h" // dprintf
+#include "util.h" // wait_irq
 #include "cmos.h" // inb_cmos
 #include "pic.h" // eoi_pic1
 #include "bregs.h" // struct bregs
-#include "boot.h" // boot_add_floppy
-#include "pci.h" // pci_to_bdf
-#include "pci_ids.h" // PCI_CLASS_BRIDGE_ISA
 
 #define FLOPPY_SIZE_CODE 0x02 // 512 byte sectors
 #define FLOPPY_DATALEN 0xff   // Not used - because size code is 0x02
@@ -47,7 +44,22 @@ struct floppy_ext_dbt_s diskette_param_table2 VAR16VISIBLE = {
     .drive_type     = 4,    // drive type in cmos
 };
 
-struct floppy_dbt_s diskette_param_table VAR16FIXED(0xefc7);
+// Since no provisions are made for multiple drive types, most
+// values in this table are ignored.  I set parameters for 1.44M
+// floppy here
+struct floppy_dbt_s diskette_param_table VAR16FIXED(0xefc7) = {
+    .specify1       = 0xAF,
+    .specify2       = 0x02,
+    .shutoff_ticks  = FLOPPY_MOTOR_TICKS,
+    .bps_code       = FLOPPY_SIZE_CODE,
+    .sectors        = 18,
+    .interblock_len = FLOPPY_GAPLEN,
+    .data_len       = FLOPPY_DATALEN,
+    .gap_len        = FLOPPY_FORMAT_GAPLEN,
+    .fill_byte      = FLOPPY_FILLBYTE,
+    .settle_time    = 0x0F,
+    .startup_time   = 0x08,
+};
 
 struct floppyinfo_s {
     struct chs_s chs;
@@ -77,67 +89,52 @@ struct floppyinfo_s FloppyInfo[] VAR16VISIBLE = {
 };
 
 struct drive_s *
-init_floppy(int floppyid, int ftype)
+addFloppy(int floppyid, int ftype, int driver)
 {
     if (ftype <= 0 || ftype >= ARRAY_SIZE(FloppyInfo)) {
         dprintf(1, "Bad floppy type %d\n", ftype);
         return NULL;
     }
 
+    char *desc = malloc_tmp(MAXDESCSIZE);
     struct drive_s *drive_g = malloc_fseg(sizeof(*drive_g));
-    if (!drive_g) {
+    if (!drive_g || !desc) {
         warn_noalloc();
+        free(desc);
+        free(drive_g);
         return NULL;
     }
     memset(drive_g, 0, sizeof(*drive_g));
     drive_g->cntl_id = floppyid;
-    drive_g->type = DTYPE_FLOPPY;
+    drive_g->type = driver;
     drive_g->blksize = DISK_SECTOR_SIZE;
     drive_g->floppy_type = ftype;
     drive_g->sectors = (u64)-1;
+    drive_g->desc = desc;
+    snprintf(desc, MAXDESCSIZE, "drive %c", 'A' + floppyid);
 
     memcpy(&drive_g->lchs, &FloppyInfo[ftype].chs
            , sizeof(FloppyInfo[ftype].chs));
-    return drive_g;
-}
 
-static void
-addFloppy(int floppyid, int ftype)
-{
-    struct drive_s *drive_g = init_floppy(floppyid, ftype);
-    if (!drive_g)
-        return;
-    char *desc = znprintf(MAXDESCSIZE, "Floppy [drive %c]", 'A' + floppyid);
-    struct pci_device *pci = pci_find_class(PCI_CLASS_BRIDGE_ISA); /* isa-to-pci bridge */
-    int prio = bootprio_find_fdc_device(pci, PORT_FD_BASE, floppyid);
-    boot_add_floppy(drive_g, desc, prio);
+    map_floppy_drive(drive_g);
+    return drive_g;
 }
 
 void
 floppy_setup(void)
 {
-    memcpy(&diskette_param_table, &diskette_param_table2
-           , sizeof(diskette_param_table));
-    SET_IVT(0x1E, SEGOFF(SEG_BIOS
-                         , (u32)&diskette_param_table2 - BUILD_BIOS_ADDR));
-
     if (! CONFIG_FLOPPY)
         return;
     dprintf(3, "init floppy drives\n");
 
     if (CONFIG_COREBOOT) {
-        u8 type = romfile_loadint("etc/floppy0", 0);
-        if (type)
-            addFloppy(0, type);
-        type = romfile_loadint("etc/floppy1", 0);
-        if (type)
-            addFloppy(1, type);
+        // XXX - disable floppies on coreboot for now.
     } else {
         u8 type = inb_cmos(CMOS_FLOPPY_DRIVE_TYPE);
         if (type & 0xf0)
-            addFloppy(0, type >> 4);
+            addFloppy(0, type >> 4, DTYPE_FLOPPY);
         if (type & 0x0f)
-            addFloppy(1, type & 0x0f);
+            addFloppy(1, type & 0x0f, DTYPE_FLOPPY);
     }
 
     outb(0x02, PORT_DMA1_MASK_REG);
@@ -180,28 +177,27 @@ static int
 wait_floppy_irq(void)
 {
     ASSERT16();
-    u8 frs;
+    u8 v;
     for (;;) {
         if (!GET_BDA(floppy_motor_counter))
             return -1;
-        frs = GET_BDA(floppy_recalibration_status);
-        if (frs & FRS_TIMEOUT)
+        v = GET_BDA(floppy_recalibration_status);
+        if (v & FRS_TIMEOUT)
             break;
-        // Could use yield_toirq() here, but that causes issues on
+        // Could use wait_irq() here, but that causes issues on
         // bochs, so use yield() instead.
         yield();
     }
 
-    frs &= ~FRS_TIMEOUT;
-    SET_BDA(floppy_recalibration_status, frs);
+    v &= ~FRS_TIMEOUT;
+    SET_BDA(floppy_recalibration_status, v);
     return 0;
 }
 
 static void
 floppy_prepare_controller(u8 floppyid)
 {
-    u8 frs = GET_BDA(floppy_recalibration_status);
-    SET_BDA(floppy_recalibration_status, frs & ~FRS_TIMEOUT);
+    CLEARBITS_BDA(floppy_recalibration_status, FRS_TIMEOUT);
 
     // turn on motor of selected drive, DMA & int enabled, normal operation
     u8 prev_reset = inb(PORT_FD_DOR) & 0x04;
@@ -316,8 +312,7 @@ floppy_drive_recal(u8 floppyid)
     data[1] = floppyid; // 0=drive0, 1=drive1
     floppy_pio(data, 2);
 
-    u8 frs = GET_BDA(floppy_recalibration_status);
-    SET_BDA(floppy_recalibration_status, frs | (1<<floppyid));
+    SETBITS_BDA(floppy_recalibration_status, 1<<floppyid);
     set_diskette_current_cyl(floppyid, 0);
 }
 
@@ -581,9 +576,9 @@ process_floppy_op(struct disk_op_s *op)
 void VISIBLE16
 handle_0e(void)
 {
-    if (! CONFIG_FLOPPY)
-        return;
     debug_isr(DEBUG_ISR_0e);
+    if (! CONFIG_FLOPPY)
+        goto done;
 
     if ((inb(PORT_FD_STATUS) & 0xc0) != 0xc0) {
         outb(0x08, PORT_FD_DATA); // sense interrupt status
@@ -594,9 +589,9 @@ handle_0e(void)
         } while ((inb(PORT_FD_STATUS) & 0xc0) == 0xc0);
     }
     // diskette interrupt has occurred
-    u8 frs = GET_BDA(floppy_recalibration_status);
-    SET_BDA(floppy_recalibration_status, frs | FRS_TIMEOUT);
+    SETBITS_BDA(floppy_recalibration_status, FRS_TIMEOUT);
 
+done:
     eoi_pic1();
 }
 

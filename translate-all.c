@@ -26,20 +26,36 @@
 
 #define NO_CPU_IO_DEFS
 #include "cpu.h"
+#include "exec-all.h"
 #include "disas.h"
 #include "tcg.h"
 #include "qemu-timer.h"
 
 /* code generation context */
+#ifdef CONFIG_PVC_SCC
+__thread TCGContext tcg_ctx;
+__thread uint16_t gen_opc_buf[OPC_BUF_SIZE];
+__thread TCGArg gen_opparam_buf[OPPARAM_BUF_SIZE];
+
+__thread target_ulong gen_opc_pc[OPC_BUF_SIZE];
+__thread uint16_t gen_opc_icount[OPC_BUF_SIZE];
+__thread uint8_t gen_opc_instr_start[OPC_BUF_SIZE];
+#else
 TCGContext tcg_ctx;
+uint16_t gen_opc_buf[OPC_BUF_SIZE];
+TCGArg gen_opparam_buf[OPPARAM_BUF_SIZE];
 
 target_ulong gen_opc_pc[OPC_BUF_SIZE];
 uint16_t gen_opc_icount[OPC_BUF_SIZE];
 uint8_t gen_opc_instr_start[OPC_BUF_SIZE];
+#endif
+
 
 void cpu_gen_init(void)
 {
     tcg_context_init(&tcg_ctx); 
+    tcg_set_frame(&tcg_ctx, TCG_AREG0, offsetof(CPUState, temp_buf),
+                  CPU_TEMP_BUF_NLONGS * sizeof(long));
 }
 
 /* return non zero if the very first instruction is invalid so that
@@ -48,7 +64,7 @@ void cpu_gen_init(void)
    '*gen_code_size_ptr' contains the size of the generated code (host
    code).
 */
-int cpu_gen_code(CPUArchState *env, TranslationBlock *tb, int *gen_code_size_ptr)
+int cpu_gen_code(CPUState *env, TranslationBlock *tb, int *gen_code_size_ptr)
 {
     TCGContext *s = &tcg_ctx;
     uint8_t *gen_code_buf;
@@ -106,11 +122,12 @@ int cpu_gen_code(CPUArchState *env, TranslationBlock *tb, int *gen_code_size_ptr
 /* The cpu state corresponding to 'searched_pc' is restored.
  */
 int cpu_restore_state(TranslationBlock *tb,
-                      CPUArchState *env, uintptr_t searched_pc)
+                      CPUState *env, unsigned long searched_pc,
+                      void *puc)
 {
     TCGContext *s = &tcg_ctx;
     int j;
-    uintptr_t tc_ptr;
+    unsigned long tc_ptr;
 #ifdef CONFIG_PROFILER
     int64_t ti;
 #endif
@@ -130,7 +147,7 @@ int cpu_restore_state(TranslationBlock *tb,
     }
 
     /* find opc index corresponding to search_pc */
-    tc_ptr = (uintptr_t)tb->tc_ptr;
+    tc_ptr = (unsigned long)tb->tc_ptr;
     if (searched_pc < tc_ptr)
         return -1;
 
@@ -150,7 +167,7 @@ int cpu_restore_state(TranslationBlock *tb,
         j--;
     env->icount_decr.u16.low -= gen_opc_icount[j];
 
-    restore_state_to_opc(env, tb, j);
+    gen_pc_load(env, tb, searched_pc, j, puc);
 
 #ifdef CONFIG_PROFILER
     s->restore_time += profile_getclock() - ti;

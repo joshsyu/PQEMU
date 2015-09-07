@@ -55,7 +55,8 @@
 #define I8042_CTR_XLATE         0x40
 
 // functions
-void i8042_reboot(void);
+int i8042_flush(void);
+int i8042_command(int command, u8 *param);
 int ps2_kbd_command(int command, u8 *param);
 int ps2_mouse_command(int command, u8 *param);
 void ps2port_setup(void);
