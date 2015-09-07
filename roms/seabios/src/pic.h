@@ -8,6 +8,7 @@
 #define __PIC_H
 
 #include "ioport.h" // PORT_PIC*
+#include "biosvar.h" // SET_IVT
 
 // PORT_PIC1 bitdefs
 #define PIC1_IRQ0  (1<<0)
@@ -22,14 +23,14 @@
 #define PIC2_IRQ14 (1<<6)
 
 static inline void
-eoi_pic1()
+eoi_pic1(void)
 {
     // Send eoi (select OCW2 + eoi)
     outb(0x20, PORT_PIC1_CMD);
 }
 
 static inline void
-eoi_pic2()
+eoi_pic2(void)
 {
     // Send eoi (select OCW2 + eoi)
     outb(0x20, PORT_PIC2_CMD);
@@ -61,7 +62,7 @@ mask_pic2(u8 irq)
 }
 
 static inline u8
-get_pic1_isr()
+get_pic1_isr(void)
 {
     // 0x0b == select OCW1 + read ISR
     outb(0x0b, PORT_PIC1_CMD);
@@ -69,18 +70,15 @@ get_pic1_isr()
 }
 
 static inline u8
-get_pic2_isr()
+get_pic2_isr(void)
 {
     // 0x0b == select OCW1 + read ISR
     outb(0x0b, PORT_PIC2_CMD);
     return inb(PORT_PIC2_CMD);
 }
 
-// post.c
-void __set_irq(int vector, void *loc);
-
 static inline void
-__enable_hwirq(int hwirq, void (*func)(void))
+enable_hwirq(int hwirq, struct segoff_s func)
 {
     int vector;
     if (hwirq < 8) {
@@ -90,14 +88,10 @@ __enable_hwirq(int hwirq, void (*func)(void))
         unmask_pic2(1 << (hwirq - 8));
         vector = 0x70 + hwirq - 8;
     }
-    __set_irq(vector, func);
+    SET_IVT(vector, func);
 }
 
-#define enable_hwirq(irq, func) do {            \
-        extern void func (void);                \
-        __enable_hwirq(irq, func);              \
-    } while (0)
-
-void pic_setup();
+void set_pics(u8 irq0, u8 irq8);
+void pic_setup(void);
 
 #endif // pic.h

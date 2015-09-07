@@ -4,7 +4,7 @@
  * Copyright (c) 2005 CodeSourcery, LLC.
  * Written by Paul Brook
  *
- * This code is licenced under the GPL
+ * This code is licensed under the GPL
  */
 
 #include "sysbus.h"
@@ -43,8 +43,37 @@ typedef struct {
     uint8_t data[NUM_PACKETS][2048];
     uint8_t int_level;
     uint8_t int_mask;
-    int mmio_index;
+    MemoryRegion mmio;
 } smc91c111_state;
+
+static const VMStateDescription vmstate_smc91c111 = {
+    .name = "smc91c111",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields      = (VMStateField []) {
+        VMSTATE_UINT16(tcr, smc91c111_state),
+        VMSTATE_UINT16(rcr, smc91c111_state),
+        VMSTATE_UINT16(cr, smc91c111_state),
+        VMSTATE_UINT16(ctr, smc91c111_state),
+        VMSTATE_UINT16(gpr, smc91c111_state),
+        VMSTATE_UINT16(ptr, smc91c111_state),
+        VMSTATE_UINT16(ercv, smc91c111_state),
+        VMSTATE_INT32(bank, smc91c111_state),
+        VMSTATE_INT32(packet_num, smc91c111_state),
+        VMSTATE_INT32(tx_alloc, smc91c111_state),
+        VMSTATE_INT32(allocated, smc91c111_state),
+        VMSTATE_INT32(tx_fifo_len, smc91c111_state),
+        VMSTATE_INT32_ARRAY(tx_fifo, smc91c111_state, NUM_PACKETS),
+        VMSTATE_INT32(rx_fifo_len, smc91c111_state),
+        VMSTATE_INT32_ARRAY(rx_fifo, smc91c111_state, NUM_PACKETS),
+        VMSTATE_INT32(tx_fifo_done_len, smc91c111_state),
+        VMSTATE_INT32_ARRAY(tx_fifo_done, smc91c111_state, NUM_PACKETS),
+        VMSTATE_BUFFER_UNSAFE(data, smc91c111_state, 0, NUM_PACKETS * 2048),
+        VMSTATE_UINT8(int_level, smc91c111_state),
+        VMSTATE_UINT8(int_mask, smc91c111_state),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 #define RCR_SOFT_RST  0x8000
 #define RCR_STRIP_CRC 0x0200
@@ -160,7 +189,6 @@ static void smc91c111_do_tx(smc91c111_state *s)
     int i;
     int len;
     int control;
-    int add_crc;
     int packetnum;
     uint8_t *p;
 
@@ -187,20 +215,22 @@ static void smc91c111_do_tx(smc91c111_state *s)
             len = 64;
         }
 #if 0
-        /* The card is supposed to append the CRC to the frame.  However
-           none of the other network traffic has the CRC appended.
-           Suspect this is low level ethernet detail we don't need to worry
-           about.  */
-        add_crc = (control & 0x10) || (s->tcr & TCR_NOCRC) == 0;
-        if (add_crc) {
-            uint32_t crc;
+        {
+            int add_crc;
 
-            crc = crc32(~0, p, len);
-            memcpy(p + len, &crc, 4);
-            len += 4;
+            /* The card is supposed to append the CRC to the frame.
+               However none of the other network traffic has the CRC
+               appended.  Suspect this is low level ethernet detail we
+               don't need to worry about.  */
+            add_crc = (control & 0x10) || (s->tcr & TCR_NOCRC) == 0;
+            if (add_crc) {
+                uint32_t crc;
+
+                crc = crc32(~0, p, len);
+                memcpy(p + len, &crc, 4);
+                len += 4;
+            }
         }
-#else
-        add_crc = 0;
 #endif
         if (s->ctr & CTR_AUTO_RELEASE)
             /* Race?  */
@@ -222,8 +252,9 @@ static void smc91c111_queue_tx(smc91c111_state *s, int packet)
     smc91c111_do_tx(s);
 }
 
-static void smc91c111_reset(smc91c111_state *s)
+static void smc91c111_reset(DeviceState *dev)
 {
+    smc91c111_state *s = FROM_SYSBUS(smc91c111_state, sysbus_from_qdev(dev));
     s->bank = 0;
     s->tx_fifo_len = 0;
     s->tx_fifo_done_len = 0;
@@ -245,11 +276,12 @@ static void smc91c111_reset(smc91c111_state *s)
 #define SET_LOW(name, val) s->name = (s->name & 0xff00) | val
 #define SET_HIGH(name, val) s->name = (s->name & 0xff) | (val << 8)
 
-static void smc91c111_writeb(void *opaque, target_phys_addr_t offset,
+static void smc91c111_writeb(void *opaque, hwaddr offset,
                              uint32_t value)
 {
     smc91c111_state *s = (smc91c111_state *)opaque;
 
+    offset = offset & 0xf;
     if (offset == 14) {
         s->bank = value;
         return;
@@ -271,10 +303,12 @@ static void smc91c111_writeb(void *opaque, target_phys_addr_t offset,
         case 5:
             SET_HIGH(rcr, value);
             if (s->rcr & RCR_SOFT_RST)
-                smc91c111_reset(s);
+                smc91c111_reset(&s->busdev.qdev);
             return;
         case 10: case 11: /* RPCR */
             /* Ignored */
+            return;
+        case 12: case 13: /* Reserved */
             return;
         }
         break;
@@ -395,7 +429,7 @@ static void smc91c111_writeb(void *opaque, target_phys_addr_t offset,
             smc91c111_update(s);
             return;
         }
-        break;;
+        break;
 
     case 3:
         switch (offset) {
@@ -417,10 +451,11 @@ static void smc91c111_writeb(void *opaque, target_phys_addr_t offset,
     hw_error("smc91c111_write: Bad reg %d:%x\n", s->bank, (int)offset);
 }
 
-static uint32_t smc91c111_readb(void *opaque, target_phys_addr_t offset)
+static uint32_t smc91c111_readb(void *opaque, hwaddr offset)
 {
     smc91c111_state *s = (smc91c111_state *)opaque;
 
+    offset = offset & 0xf;
     if (offset == 14) {
         return s->bank;
     }
@@ -460,6 +495,8 @@ static uint32_t smc91c111_readb(void *opaque, target_phys_addr_t offset)
             }
         case 10: case 11: /* RPCR */
             /* Not implemented.  */
+            return 0;
+        case 12: case 13: /* Reserved */
             return 0;
         }
         break;
@@ -558,14 +595,14 @@ static uint32_t smc91c111_readb(void *opaque, target_phys_addr_t offset)
     return 0;
 }
 
-static void smc91c111_writew(void *opaque, target_phys_addr_t offset,
+static void smc91c111_writew(void *opaque, hwaddr offset,
                              uint32_t value)
 {
     smc91c111_writeb(opaque, offset, value & 0xff);
     smc91c111_writeb(opaque, offset + 1, value >> 8);
 }
 
-static void smc91c111_writel(void *opaque, target_phys_addr_t offset,
+static void smc91c111_writel(void *opaque, hwaddr offset,
                              uint32_t value)
 {
     /* 32-bit writes to offset 0xc only actually write to the bank select
@@ -575,7 +612,7 @@ static void smc91c111_writel(void *opaque, target_phys_addr_t offset,
     smc91c111_writew(opaque, offset + 2, value >> 16);
 }
 
-static uint32_t smc91c111_readw(void *opaque, target_phys_addr_t offset)
+static uint32_t smc91c111_readw(void *opaque, hwaddr offset)
 {
     uint32_t val;
     val = smc91c111_readb(opaque, offset);
@@ -583,7 +620,7 @@ static uint32_t smc91c111_readw(void *opaque, target_phys_addr_t offset)
     return val;
 }
 
-static uint32_t smc91c111_readl(void *opaque, target_phys_addr_t offset)
+static uint32_t smc91c111_readl(void *opaque, hwaddr offset)
 {
     uint32_t val;
     val = smc91c111_readw(opaque, offset);
@@ -591,7 +628,7 @@ static uint32_t smc91c111_readl(void *opaque, target_phys_addr_t offset)
     return val;
 }
 
-static int smc91c111_can_receive(VLANClientState *nc)
+static int smc91c111_can_receive(NetClientState *nc)
 {
     smc91c111_state *s = DO_UPCAST(NICState, nc, nc)->opaque;
 
@@ -602,7 +639,7 @@ static int smc91c111_can_receive(VLANClientState *nc)
     return 1;
 }
 
-static ssize_t smc91c111_receive(VLANClientState *nc, const uint8_t *buf, size_t size)
+static ssize_t smc91c111_receive(NetClientState *nc, const uint8_t *buf, size_t size)
 {
     smc91c111_state *s = DO_UPCAST(NICState, nc, nc)->opaque;
     int status;
@@ -664,14 +701,14 @@ static ssize_t smc91c111_receive(VLANClientState *nc, const uint8_t *buf, size_t
         *(p++) = crc & 0xff; crc >>= 8;
         *(p++) = crc & 0xff; crc >>= 8;
         *(p++) = crc & 0xff; crc >>= 8;
-        *(p++) = crc & 0xff; crc >>= 8;
+        *(p++) = crc & 0xff;
     }
     if (size & 1) {
         *(p++) = buf[size - 1];
-        *(p++) = 0x60;
+        *p = 0x60;
     } else {
         *(p++) = 0;
-        *(p++) = 0x40;
+        *p = 0x40;
     }
     /* TODO: Raise early RX interrupt?  */
     s->int_level |= INT_RCV;
@@ -680,19 +717,18 @@ static ssize_t smc91c111_receive(VLANClientState *nc, const uint8_t *buf, size_t
     return size;
 }
 
-static CPUReadMemoryFunc * const smc91c111_readfn[] = {
-    smc91c111_readb,
-    smc91c111_readw,
-    smc91c111_readl
+static const MemoryRegionOps smc91c111_mem_ops = {
+    /* The special case for 32 bit writes to 0xc means we can't just
+     * set .impl.min/max_access_size to 1, unfortunately
+     */
+    .old_mmio = {
+        .read = { smc91c111_readb, smc91c111_readw, smc91c111_readl, },
+        .write = { smc91c111_writeb, smc91c111_writew, smc91c111_writel, },
+    },
+    .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
-static CPUWriteMemoryFunc * const smc91c111_writefn[] = {
-    smc91c111_writeb,
-    smc91c111_writew,
-    smc91c111_writel
-};
-
-static void smc91c111_cleanup(VLANClientState *nc)
+static void smc91c111_cleanup(NetClientState *nc)
 {
     smc91c111_state *s = DO_UPCAST(NICState, nc, nc)->opaque;
 
@@ -700,7 +736,7 @@ static void smc91c111_cleanup(VLANClientState *nc)
 }
 
 static NetClientInfo net_smc91c111_info = {
-    .type = NET_CLIENT_TYPE_NIC,
+    .type = NET_CLIENT_OPTIONS_KIND_NIC,
     .size = sizeof(NICState),
     .can_receive = smc91c111_can_receive,
     .receive = smc91c111_receive,
@@ -710,35 +746,44 @@ static NetClientInfo net_smc91c111_info = {
 static int smc91c111_init1(SysBusDevice *dev)
 {
     smc91c111_state *s = FROM_SYSBUS(smc91c111_state, dev);
-
-    s->mmio_index = cpu_register_io_memory(smc91c111_readfn,
-                                           smc91c111_writefn, s);
-    sysbus_init_mmio(dev, 16, s->mmio_index);
+    memory_region_init_io(&s->mmio, &smc91c111_mem_ops, s,
+                          "smc91c111-mmio", 16);
+    sysbus_init_mmio(dev, &s->mmio);
     sysbus_init_irq(dev, &s->irq);
     qemu_macaddr_default_if_unset(&s->conf.macaddr);
-
-    smc91c111_reset(s);
-
     s->nic = qemu_new_nic(&net_smc91c111_info, &s->conf,
-                          dev->qdev.info->name, dev->qdev.id, s);
+                          object_get_typename(OBJECT(dev)), dev->qdev.id, s);
     qemu_format_nic_info_str(&s->nic->nc, s->conf.macaddr.a);
     /* ??? Save/restore.  */
     return 0;
 }
 
-static SysBusDeviceInfo smc91c111_info = {
-    .init = smc91c111_init1,
-    .qdev.name  = "smc91c111",
-    .qdev.size  = sizeof(smc91c111_state),
-    .qdev.props = (Property[]) {
-        DEFINE_NIC_PROPERTIES(smc91c111_state, conf),
-        DEFINE_PROP_END_OF_LIST(),
-    }
+static Property smc91c111_properties[] = {
+    DEFINE_NIC_PROPERTIES(smc91c111_state, conf),
+    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void smc91c111_register_devices(void)
+static void smc91c111_class_init(ObjectClass *klass, void *data)
 {
-    sysbus_register_withprop(&smc91c111_info);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
+
+    k->init = smc91c111_init1;
+    dc->reset = smc91c111_reset;
+    dc->vmsd = &vmstate_smc91c111;
+    dc->props = smc91c111_properties;
+}
+
+static TypeInfo smc91c111_info = {
+    .name          = "smc91c111",
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(smc91c111_state),
+    .class_init    = smc91c111_class_init,
+};
+
+static void smc91c111_register_types(void)
+{
+    type_register_static(&smc91c111_info);
 }
 
 /* Legacy helper function.  Should go away when machine config files are
@@ -757,4 +802,4 @@ void smc91c111_init(NICInfo *nd, uint32_t base, qemu_irq irq)
     sysbus_connect_irq(s, 0, irq);
 }
 
-device_init(smc91c111_register_devices)
+type_init(smc91c111_register_types)

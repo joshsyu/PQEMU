@@ -18,6 +18,10 @@
 #include "net.h"
 #include "qdev.h"
 #include "sysemu.h"
+#include "event_notifier.h"
+#ifdef CONFIG_LINUX
+#include "9p.h"
+#endif
 
 /* from Linux's linux/virtio_config.h */
 
@@ -41,6 +45,11 @@
 #define VIRTIO_F_NOTIFY_ON_EMPTY        24
 /* We support indirect buffer descriptors */
 #define VIRTIO_RING_F_INDIRECT_DESC     28
+/* The Guest publishes the used index for which it expects an interrupt
+ * at the end of the avail ring. Host should ignore the avail->flags field. */
+/* The Host publishes the avail index for which it expects a kick
+ * at the end of the used ring. Guest should ignore the used->flags field. */
+#define VIRTIO_RING_F_EVENT_IDX         29
 /* A guest should never accept this.  It implies negotiation is broken. */
 #define VIRTIO_F_BAD_FEATURE		30
 
@@ -60,14 +69,13 @@
 
 struct VirtQueue;
 
-static inline target_phys_addr_t vring_align(target_phys_addr_t addr,
+static inline hwaddr vring_align(hwaddr addr,
                                              unsigned long align)
 {
     return (addr + align - 1) & ~(align - 1);
 }
 
 typedef struct VirtQueue VirtQueue;
-typedef struct VirtIODevice VirtIODevice;
 
 #define VIRTQUEUE_MAX_SIZE 1024
 
@@ -76,7 +84,8 @@ typedef struct VirtQueueElement
     unsigned int index;
     unsigned int out_num;
     unsigned int in_num;
-    target_phys_addr_t in_addr[VIRTQUEUE_MAX_SIZE];
+    hwaddr in_addr[VIRTQUEUE_MAX_SIZE];
+    hwaddr out_addr[VIRTQUEUE_MAX_SIZE];
     struct iovec in_sg[VIRTQUEUE_MAX_SIZE];
     struct iovec out_sg[VIRTQUEUE_MAX_SIZE];
 } VirtQueueElement;
@@ -87,10 +96,15 @@ typedef struct {
     void (*save_queue)(void * opaque, int n, QEMUFile *f);
     int (*load_config)(void * opaque, QEMUFile *f);
     int (*load_queue)(void * opaque, int n, QEMUFile *f);
+    int (*load_done)(void * opaque, QEMUFile *f);
     unsigned (*get_features)(void * opaque);
+    bool (*query_guest_notifiers)(void * opaque);
+    int (*set_guest_notifiers)(void * opaque, bool assigned);
+    int (*set_host_notifier)(void * opaque, int n, bool assigned);
+    void (*vmstate_change)(void * opaque, bool running);
 } VirtIOBindings;
 
-#define VIRTIO_PCI_QUEUE_MAX 16
+#define VIRTIO_PCI_QUEUE_MAX 64
 
 #define VIRTIO_NO_VECTOR 0xffff
 
@@ -100,21 +114,24 @@ struct VirtIODevice
     uint8_t status;
     uint8_t isr;
     uint16_t queue_sel;
-    uint32_t features;
+    uint32_t guest_features;
     size_t config_len;
     void *config;
     uint16_t config_vector;
     int nvectors;
-    uint32_t (*get_features)(VirtIODevice *vdev);
+    uint32_t (*get_features)(VirtIODevice *vdev, uint32_t requested_features);
     uint32_t (*bad_features)(VirtIODevice *vdev);
     void (*set_features)(VirtIODevice *vdev, uint32_t val);
     void (*get_config)(VirtIODevice *vdev, uint8_t *config);
     void (*set_config)(VirtIODevice *vdev, const uint8_t *config);
     void (*reset)(VirtIODevice *vdev);
+    void (*set_status)(VirtIODevice *vdev, uint8_t val);
     VirtQueue *vq;
     const VirtIOBindings *binding;
     void *binding_opaque;
     uint16_t device_id;
+    bool vm_running;
+    VMChangeStateEntry *vmstate;
 };
 
 VirtQueue *virtio_add_queue(VirtIODevice *vdev, int queue_size,
@@ -127,8 +144,14 @@ void virtqueue_flush(VirtQueue *vq, unsigned int count);
 void virtqueue_fill(VirtQueue *vq, const VirtQueueElement *elem,
                     unsigned int len, unsigned int idx);
 
+void virtqueue_map_sg(struct iovec *sg, hwaddr *addr,
+    size_t num_sg, int is_write);
 int virtqueue_pop(VirtQueue *vq, VirtQueueElement *elem);
-int virtqueue_avail_bytes(VirtQueue *vq, int in_bytes, int out_bytes);
+int virtqueue_avail_bytes(VirtQueue *vq, unsigned int in_bytes,
+                          unsigned int out_bytes);
+void virtqueue_get_avail_bytes(VirtQueue *vq, unsigned int *in_bytes,
+                               unsigned int *out_bytes,
+                               unsigned max_in_bytes, unsigned max_out_bytes);
 
 void virtio_notify(VirtIODevice *vdev, VirtQueue *vq);
 
@@ -156,24 +179,69 @@ uint32_t virtio_config_readl(VirtIODevice *vdev, uint32_t addr);
 void virtio_config_writeb(VirtIODevice *vdev, uint32_t addr, uint32_t data);
 void virtio_config_writew(VirtIODevice *vdev, uint32_t addr, uint32_t data);
 void virtio_config_writel(VirtIODevice *vdev, uint32_t addr, uint32_t data);
-void virtio_queue_set_addr(VirtIODevice *vdev, int n, target_phys_addr_t addr);
-target_phys_addr_t virtio_queue_get_addr(VirtIODevice *vdev, int n);
+void virtio_queue_set_addr(VirtIODevice *vdev, int n, hwaddr addr);
+hwaddr virtio_queue_get_addr(VirtIODevice *vdev, int n);
 int virtio_queue_get_num(VirtIODevice *vdev, int n);
 void virtio_queue_notify(VirtIODevice *vdev, int n);
 uint16_t virtio_queue_vector(VirtIODevice *vdev, int n);
 void virtio_queue_set_vector(VirtIODevice *vdev, int n, uint16_t vector);
+void virtio_set_status(VirtIODevice *vdev, uint8_t val);
 void virtio_reset(void *opaque);
 void virtio_update_irq(VirtIODevice *vdev);
+int virtio_set_features(VirtIODevice *vdev, uint32_t val);
 
 void virtio_bind_device(VirtIODevice *vdev, const VirtIOBindings *binding,
                         void *opaque);
 
 /* Base devices.  */
-VirtIODevice *virtio_blk_init(DeviceState *dev, DriveInfo *dinfo);
-VirtIODevice *virtio_net_init(DeviceState *dev, NICConf *conf);
-VirtIODevice *virtio_console_init(DeviceState *dev);
+typedef struct VirtIOBlkConf VirtIOBlkConf;
+VirtIODevice *virtio_blk_init(DeviceState *dev, VirtIOBlkConf *blk);
+struct virtio_net_conf;
+VirtIODevice *virtio_net_init(DeviceState *dev, NICConf *conf,
+                              struct virtio_net_conf *net);
+typedef struct virtio_serial_conf virtio_serial_conf;
+VirtIODevice *virtio_serial_init(DeviceState *dev, virtio_serial_conf *serial);
 VirtIODevice *virtio_balloon_init(DeviceState *dev);
+typedef struct VirtIOSCSIConf VirtIOSCSIConf;
+VirtIODevice *virtio_scsi_init(DeviceState *dev, VirtIOSCSIConf *conf);
+typedef struct VirtIORNGConf VirtIORNGConf;
+VirtIODevice *virtio_rng_init(DeviceState *dev, VirtIORNGConf *conf);
+#ifdef CONFIG_LINUX
+VirtIODevice *virtio_9p_init(DeviceState *dev, V9fsConf *conf);
+#endif
+
 
 void virtio_net_exit(VirtIODevice *vdev);
+void virtio_blk_exit(VirtIODevice *vdev);
+void virtio_serial_exit(VirtIODevice *vdev);
+void virtio_balloon_exit(VirtIODevice *vdev);
+void virtio_scsi_exit(VirtIODevice *vdev);
+void virtio_rng_exit(VirtIODevice *vdev);
 
+#define DEFINE_VIRTIO_COMMON_FEATURES(_state, _field) \
+	DEFINE_PROP_BIT("indirect_desc", _state, _field, \
+			VIRTIO_RING_F_INDIRECT_DESC, true), \
+	DEFINE_PROP_BIT("event_idx", _state, _field, \
+			VIRTIO_RING_F_EVENT_IDX, true)
+
+hwaddr virtio_queue_get_desc_addr(VirtIODevice *vdev, int n);
+hwaddr virtio_queue_get_avail_addr(VirtIODevice *vdev, int n);
+hwaddr virtio_queue_get_used_addr(VirtIODevice *vdev, int n);
+hwaddr virtio_queue_get_ring_addr(VirtIODevice *vdev, int n);
+hwaddr virtio_queue_get_desc_size(VirtIODevice *vdev, int n);
+hwaddr virtio_queue_get_avail_size(VirtIODevice *vdev, int n);
+hwaddr virtio_queue_get_used_size(VirtIODevice *vdev, int n);
+hwaddr virtio_queue_get_ring_size(VirtIODevice *vdev, int n);
+uint16_t virtio_queue_get_last_avail_idx(VirtIODevice *vdev, int n);
+void virtio_queue_set_last_avail_idx(VirtIODevice *vdev, int n, uint16_t idx);
+VirtQueue *virtio_get_queue(VirtIODevice *vdev, int n);
+int virtio_queue_get_id(VirtQueue *vq);
+EventNotifier *virtio_queue_get_guest_notifier(VirtQueue *vq);
+void virtio_queue_set_guest_notifier_fd_handler(VirtQueue *vq, bool assign,
+                                                bool with_irqfd);
+EventNotifier *virtio_queue_get_host_notifier(VirtQueue *vq);
+void virtio_queue_set_host_notifier_fd_handler(VirtQueue *vq, bool assign,
+                                               bool set_handler);
+void virtio_queue_notify_vq(VirtQueue *vq);
+void virtio_irq(VirtQueue *vq);
 #endif

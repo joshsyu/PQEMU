@@ -34,34 +34,30 @@
 #define _IP_H_
 
 #ifdef HOST_WORDS_BIGENDIAN
-# ifndef NTOHL
-#  define NTOHL(d)
-# endif
-# ifndef NTOHS
-#  define NTOHS(d)
-# endif
-# ifndef HTONL
-#  define HTONL(d)
-# endif
-# ifndef HTONS
-#  define HTONS(d)
-# endif
+# undef NTOHL
+# undef NTOHS
+# undef HTONL
+# undef HTONS
+# define NTOHL(d)
+# define NTOHS(d)
+# define HTONL(d)
+# define HTONS(d)
 #else
 # ifndef NTOHL
 #  define NTOHL(d) ((d) = ntohl((d)))
 # endif
 # ifndef NTOHS
-#  define NTOHS(d) ((d) = ntohs((u_int16_t)(d)))
+#  define NTOHS(d) ((d) = ntohs((uint16_t)(d)))
 # endif
 # ifndef HTONL
 #  define HTONL(d) ((d) = htonl((d)))
 # endif
 # ifndef HTONS
-#  define HTONS(d) ((d) = htons((u_int16_t)(d)))
+#  define HTONS(d) ((d) = htons((uint16_t)(d)))
 # endif
 #endif
 
-typedef u_int32_t n_long;                 /* long as received from the net */
+typedef uint32_t n_long;                 /* long as received from the net */
 
 /*
  * Definitions for internet protocol version 4.
@@ -74,24 +70,24 @@ typedef u_int32_t n_long;                 /* long as received from the net */
  */
 struct ip {
 #ifdef HOST_WORDS_BIGENDIAN
-	u_int ip_v:4,			/* version */
+	uint8_t ip_v:4,			/* version */
 		ip_hl:4;		/* header length */
 #else
-	u_int ip_hl:4,		/* header length */
+	uint8_t ip_hl:4,		/* header length */
 		ip_v:4;			/* version */
 #endif
-	u_int8_t ip_tos;			/* type of service */
-	u_int16_t	ip_len;			/* total length */
-	u_int16_t	ip_id;			/* identification */
-	u_int16_t	ip_off;			/* fragment offset field */
+	uint8_t		ip_tos;			/* type of service */
+	uint16_t	ip_len;			/* total length */
+	uint16_t	ip_id;			/* identification */
+	uint16_t	ip_off;			/* fragment offset field */
 #define	IP_DF 0x4000			/* don't fragment flag */
 #define	IP_MF 0x2000			/* more fragments flag */
 #define	IP_OFFMASK 0x1fff		/* mask for fragmenting bits */
-	u_int8_t ip_ttl;			/* time to live */
-	u_int8_t ip_p;			/* protocol */
-	u_int16_t	ip_sum;			/* checksum */
+	uint8_t ip_ttl;			/* time to live */
+	uint8_t ip_p;			/* protocol */
+	uint16_t	ip_sum;			/* checksum */
 	struct	in_addr ip_src,ip_dst;	/* source and dest address */
-};
+} QEMU_PACKED;
 
 #define	IP_MAXPACKET	65535		/* maximum packet size */
 
@@ -136,14 +132,14 @@ struct ip {
  * Time stamp option structure.
  */
 struct	ip_timestamp {
-	u_int8_t	ipt_code;		/* IPOPT_TS */
-	u_int8_t	ipt_len;		/* size of structure (variable) */
-	u_int8_t	ipt_ptr;		/* index of current entry */
+	uint8_t	ipt_code;		/* IPOPT_TS */
+	uint8_t	ipt_len;		/* size of structure (variable) */
+	uint8_t	ipt_ptr;		/* index of current entry */
 #ifdef HOST_WORDS_BIGENDIAN
-	u_int	ipt_oflw:4,		/* overflow counter */
+	uint8_t	ipt_oflw:4,		/* overflow counter */
 		ipt_flg:4;		/* flags, see below */
 #else
-	u_int	ipt_flg:4,		/* flags, see below */
+	uint8_t	ipt_flg:4,		/* flags, see below */
 		ipt_oflw:4;		/* overflow counter */
 #endif
 	union ipt_timestamp {
@@ -153,7 +149,7 @@ struct	ip_timestamp {
 			n_long ipt_time;
 		} ipt_ta[1];
 	} ipt_timestamp;
-};
+} QEMU_PACKED;
 
 /* flag bits for ipt_flg */
 #define	IPOPT_TS_TSONLY		0		/* timestamps only */
@@ -183,11 +179,11 @@ struct	ip_timestamp {
 struct mbuf_ptr {
 	struct mbuf *mptr;
 	uint32_t dummy;
-};
+} QEMU_PACKED;
 #else
 struct mbuf_ptr {
 	struct mbuf *mptr;
-};
+} QEMU_PACKED;
 #endif
 struct qlink {
 	void *next, *prev;
@@ -198,12 +194,12 @@ struct qlink {
  */
 struct ipovly {
 	struct mbuf_ptr ih_mbuf;	/* backpointer to mbuf */
-	u_int8_t	ih_x1;			/* (unused) */
-	u_int8_t	ih_pr;			/* protocol */
-	u_int16_t	ih_len;			/* protocol length */
+	uint8_t	ih_x1;			/* (unused) */
+	uint8_t	ih_pr;			/* protocol */
+	uint16_t	ih_len;			/* protocol length */
 	struct	in_addr ih_src;		/* source internet address */
 	struct	in_addr ih_dst;		/* destination internet address */
-} __attribute__((packed));
+} QEMU_PACKED;
 
 /*
  * Ip reassembly queue structure.  Each fragment
@@ -215,11 +211,11 @@ struct ipovly {
 struct ipq {
         struct qlink frag_link;			/* to ip headers of fragments */
 	struct qlink ip_link;				/* to other reass headers */
-	u_int8_t	ipq_ttl;		/* time for reass q to live */
-	u_int8_t	ipq_p;			/* protocol of this fragment */
-	u_int16_t	ipq_id;			/* sequence id for reassembly */
+	uint8_t	ipq_ttl;		/* time for reass q to live */
+	uint8_t	ipq_p;			/* protocol of this fragment */
+	uint16_t	ipq_id;			/* sequence id for reassembly */
 	struct	in_addr ipq_src,ipq_dst;
-};
+} QEMU_PACKED;
 
 /*
  * Ip header, when holding a fragment.
@@ -229,13 +225,13 @@ struct ipq {
 struct	ipasfrag {
 	struct qlink ipf_link;
 	struct ip ipf_ip;
-};
+} QEMU_PACKED;
 
 #define ipf_off      ipf_ip.ip_off
 #define ipf_tos      ipf_ip.ip_tos
 #define ipf_len      ipf_ip.ip_len
 #define ipf_next     ipf_link.next
-#define ipf_prev     ipf_link.prev 
+#define ipf_prev     ipf_link.prev
 
 /*
  * Structure stored in mbuf in inpcb.ip_options
@@ -248,6 +244,6 @@ struct	ipasfrag {
 struct ipoption {
 	struct	in_addr ipopt_dst;	/* first-hop dst if source routed */
 	int8_t	ipopt_list[MAX_IPOPTLEN];	/* options proper */
-};
+} QEMU_PACKED;
 
 #endif

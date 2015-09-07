@@ -14,10 +14,7 @@ def main():
 
     # Read in symbols
     objinfofile = open(objinfo, 'rb')
-    symbols = layoutrom.parseObjDump(objinfofile)[1]
-    syms = {}
-    for name, (addr, section) in symbols.items():
-        syms[name] = addr
+    symbols = layoutrom.parseObjDump(objinfofile, 'in')[1]
 
     # Read in raw file
     f = open(rawfile, 'rb')
@@ -27,29 +24,34 @@ def main():
     finalsize = 64*1024
     if datasize > 64*1024:
         finalsize = 128*1024
+        if datasize > 128*1024:
+            finalsize = 256*1024
 
     # Sanity checks
-    c16e = syms['code16_end'] + 0xf0000
-    f16e = syms['final_code16_end']
-    if c16e != f16e:
-        print "Error!  16bit code moved during linking (0x%x vs 0x%x)" % (
-            c16e, f16e)
+    start = symbols['code32flat_start'].offset
+    end = symbols['code32flat_end'].offset
+    expend = layoutrom.BUILD_BIOS_ADDR + layoutrom.BUILD_BIOS_SIZE
+    if end != expend:
+        print "Error!  Code does not end at 0x%x (got 0x%x)" % (
+            expend, end)
         sys.exit(1)
     if datasize > finalsize:
         print "Error!  Code is too big (0x%x vs 0x%x)" % (
             datasize, finalsize)
         sys.exit(1)
+    expdatasize = end - start
+    if datasize != expdatasize:
+        print "Error!  Unknown extra data (0x%x vs 0x%x)" % (
+            datasize, expdatasize)
+        sys.exit(1)
 
     # Print statistics
-    sizefree = syms['freespace_end'] - syms['freespace_start']
-    size16 = syms['code16_end'] - syms['code16_start']
-    size32 = syms['code32_end'] - syms['code32_start']
-    totalc = size16+size32
-    print "16bit size: %d" % size16
-    print "32bit size: %d" % size32
-    print "Total size: %d  Free space: %d  Percent used: %.1f%% (%dKiB rom)" % (
-        totalc, sizefree + finalsize - datasize
-        , (totalc / float(finalsize)) * 100.0
+    runtimesize = datasize
+    if '_reloc_abs_start' in symbols:
+        runtimesize = end - symbols['code32init_end'].offset
+    print "Total size: %d  Fixed: %d  Free: %d (used %.1f%% of %dKiB rom)" % (
+        datasize, runtimesize, finalsize - datasize
+        , (datasize / float(finalsize)) * 100.0
         , finalsize / 1024)
 
     # Write final file

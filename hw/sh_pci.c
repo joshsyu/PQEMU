@@ -21,24 +21,30 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#include "hw.h"
+#include "sysbus.h"
 #include "sh.h"
 #include "pci.h"
 #include "pci_host.h"
-#include "sh_pci.h"
 #include "bswap.h"
+#include "exec-memory.h"
 
-typedef struct {
+typedef struct SHPCIState {
+    SysBusDevice busdev;
     PCIBus *bus;
     PCIDevice *dev;
+    qemu_irq irq[4];
+    MemoryRegion memconfig_p4;
+    MemoryRegion memconfig_a7;
+    MemoryRegion isa;
     uint32_t par;
     uint32_t mbr;
     uint32_t iobr;
-} SHPCIC;
+} SHPCIState;
 
-static void sh_pci_reg_write (void *p, target_phys_addr_t addr, uint32_t val)
+static void sh_pci_reg_write (void *p, hwaddr addr, uint64_t val,
+                              unsigned size)
 {
-    SHPCIC *pcic = p;
+    SHPCIState *pcic = p;
     switch(addr) {
     case 0 ... 0xfc:
         cpu_to_le32w((uint32_t*)(pcic->dev->config + addr), val);
@@ -47,10 +53,15 @@ static void sh_pci_reg_write (void *p, target_phys_addr_t addr, uint32_t val)
         pcic->par = val;
         break;
     case 0x1c4:
-        pcic->mbr = val;
+        pcic->mbr = val & 0xff000001;
         break;
     case 0x1c8:
-        pcic->iobr = val;
+        if ((val & 0xfffc0000) != (pcic->iobr & 0xfffc0000)) {
+            memory_region_del_subregion(get_system_memory(), &pcic->isa);
+            pcic->iobr = val & 0xfffc0001;
+            memory_region_add_subregion(get_system_memory(),
+                                        pcic->iobr & 0xfffc0000, &pcic->isa);
+        }
         break;
     case 0x220:
         pci_data_write(pcic->bus, pcic->par, val, 4);
@@ -58,145 +69,118 @@ static void sh_pci_reg_write (void *p, target_phys_addr_t addr, uint32_t val)
     }
 }
 
-static uint32_t sh_pci_reg_read (void *p, target_phys_addr_t addr)
+static uint64_t sh_pci_reg_read (void *p, hwaddr addr,
+                                 unsigned size)
 {
-    SHPCIC *pcic = p;
+    SHPCIState *pcic = p;
     switch(addr) {
     case 0 ... 0xfc:
         return le32_to_cpup((uint32_t*)(pcic->dev->config + addr));
     case 0x1c0:
         return pcic->par;
+    case 0x1c4:
+        return pcic->mbr;
+    case 0x1c8:
+        return pcic->iobr;
     case 0x220:
         return pci_data_read(pcic->bus, pcic->par, 4);
     }
     return 0;
 }
 
-static void sh_pci_data_write (SHPCIC *pcic, target_phys_addr_t addr,
-                               uint32_t val, int size)
-{
-    pci_data_write(pcic->bus, addr + pcic->mbr, val, size);
-}
-
-static uint32_t sh_pci_mem_read (SHPCIC *pcic, target_phys_addr_t addr,
-                                 int size)
-{
-    return pci_data_read(pcic->bus, addr + pcic->mbr, size);
-}
-
-static void sh_pci_writeb (void *p, target_phys_addr_t addr, uint32_t val)
-{
-    sh_pci_data_write(p, addr, val, 1);
-}
-
-static void sh_pci_writew (void *p, target_phys_addr_t addr, uint32_t val)
-{
-    sh_pci_data_write(p, addr, val, 2);
-}
-
-static void sh_pci_writel (void *p, target_phys_addr_t addr, uint32_t val)
-{
-    sh_pci_data_write(p, addr, val, 4);
-}
-
-static uint32_t sh_pci_readb (void *p, target_phys_addr_t addr)
-{
-    return sh_pci_mem_read(p, addr, 1);
-}
-
-static uint32_t sh_pci_readw (void *p, target_phys_addr_t addr)
-{
-    return sh_pci_mem_read(p, addr, 2);
-}
-
-static uint32_t sh_pci_readl (void *p, target_phys_addr_t addr)
-{
-    return sh_pci_mem_read(p, addr, 4);
-}
-
-static int sh_pci_addr2port(SHPCIC *pcic, target_phys_addr_t addr)
-{
-    return addr + pcic->iobr;
-}
-
-static void sh_pci_outb (void *p, target_phys_addr_t addr, uint32_t val)
-{
-    cpu_outb(sh_pci_addr2port(p, addr), val);
-}
-
-static void sh_pci_outw (void *p, target_phys_addr_t addr, uint32_t val)
-{
-    cpu_outw(sh_pci_addr2port(p, addr), val);
-}
-
-static void sh_pci_outl (void *p, target_phys_addr_t addr, uint32_t val)
-{
-    cpu_outl(sh_pci_addr2port(p, addr), val);
-}
-
-static uint32_t sh_pci_inb (void *p, target_phys_addr_t addr)
-{
-    return cpu_inb(sh_pci_addr2port(p, addr));
-}
-
-static uint32_t sh_pci_inw (void *p, target_phys_addr_t addr)
-{
-    return cpu_inw(sh_pci_addr2port(p, addr));
-}
-
-static uint32_t sh_pci_inl (void *p, target_phys_addr_t addr)
-{
-    return cpu_inl(sh_pci_addr2port(p, addr));
-}
-
-typedef struct {
-    CPUReadMemoryFunc * const r[3];
-    CPUWriteMemoryFunc * const w[3];
-} MemOp;
-
-static MemOp sh_pci_reg = {
-    { NULL, NULL, sh_pci_reg_read },
-    { NULL, NULL, sh_pci_reg_write },
+static const MemoryRegionOps sh_pci_reg_ops = {
+    .read = sh_pci_reg_read,
+    .write = sh_pci_reg_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
 };
 
-static MemOp sh_pci_mem = {
-    { sh_pci_readb, sh_pci_readw, sh_pci_readl },
-    { sh_pci_writeb, sh_pci_writew, sh_pci_writel },
-};
-
-static MemOp sh_pci_iop = {
-    { sh_pci_inb, sh_pci_inw, sh_pci_inl },
-    { sh_pci_outb, sh_pci_outw, sh_pci_outl },
-};
-
-PCIBus *sh_pci_register_bus(pci_set_irq_fn set_irq, pci_map_irq_fn map_irq,
-                            void *opaque, int devfn_min, int nirq)
+static int sh_pci_map_irq(PCIDevice *d, int irq_num)
 {
-    SHPCIC *p;
-    int mem, reg, iop;
-
-    p = qemu_mallocz(sizeof(SHPCIC));
-    p->bus = pci_register_bus(NULL, "pci",
-                              set_irq, map_irq, opaque, devfn_min, nirq);
-
-    p->dev = pci_register_device(p->bus, "SH PCIC", sizeof(PCIDevice),
-                                 -1, NULL, NULL);
-    reg = cpu_register_io_memory(sh_pci_reg.r, sh_pci_reg.w, p);
-    iop = cpu_register_io_memory(sh_pci_iop.r, sh_pci_iop.w, p);
-    mem = cpu_register_io_memory(sh_pci_mem.r, sh_pci_mem.w, p);
-    cpu_register_physical_memory(0x1e200000, 0x224, reg);
-    cpu_register_physical_memory(0x1e240000, 0x40000, iop);
-    cpu_register_physical_memory(0x1d000000, 0x1000000, mem);
-    cpu_register_physical_memory(0xfe200000, 0x224, reg);
-    cpu_register_physical_memory(0xfe240000, 0x40000, iop);
-    cpu_register_physical_memory(0xfd000000, 0x1000000, mem);
-
-    pci_config_set_vendor_id(p->dev->config, PCI_VENDOR_ID_HITACHI);
-    pci_config_set_device_id(p->dev->config, PCI_DEVICE_ID_HITACHI_SH7751R);
-    p->dev->config[0x04] = 0x80;
-    p->dev->config[0x05] = 0x00;
-    p->dev->config[0x06] = 0x90;
-    p->dev->config[0x07] = 0x02;
-
-    return p->bus;
+    return (d->devfn >> 3);
 }
+
+static void sh_pci_set_irq(void *opaque, int irq_num, int level)
+{
+    qemu_irq *pic = opaque;
+
+    qemu_set_irq(pic[irq_num], level);
+}
+
+static int sh_pci_device_init(SysBusDevice *dev)
+{
+    SHPCIState *s;
+    int i;
+
+    s = FROM_SYSBUS(SHPCIState, dev);
+    for (i = 0; i < 4; i++) {
+        sysbus_init_irq(dev, &s->irq[i]);
+    }
+    s->bus = pci_register_bus(&s->busdev.qdev, "pci",
+                              sh_pci_set_irq, sh_pci_map_irq,
+                              s->irq,
+                              get_system_memory(),
+                              get_system_io(),
+                              PCI_DEVFN(0, 0), 4);
+    memory_region_init_io(&s->memconfig_p4, &sh_pci_reg_ops, s,
+                          "sh_pci", 0x224);
+    memory_region_init_alias(&s->memconfig_a7, "sh_pci.2", &s->memconfig_p4,
+                             0, 0x224);
+    isa_mmio_setup(&s->isa, 0x40000);
+    sysbus_init_mmio(dev, &s->memconfig_p4);
+    sysbus_init_mmio(dev, &s->memconfig_a7);
+    s->iobr = 0xfe240000;
+    memory_region_add_subregion(get_system_memory(), s->iobr, &s->isa);
+
+    s->dev = pci_create_simple(s->bus, PCI_DEVFN(0, 0), "sh_pci_host");
+    return 0;
+}
+
+static int sh_pci_host_init(PCIDevice *d)
+{
+    pci_set_word(d->config + PCI_COMMAND, PCI_COMMAND_WAIT);
+    pci_set_word(d->config + PCI_STATUS, PCI_STATUS_CAP_LIST |
+                 PCI_STATUS_FAST_BACK | PCI_STATUS_DEVSEL_MEDIUM);
+    return 0;
+}
+
+static void sh_pci_host_class_init(ObjectClass *klass, void *data)
+{
+    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+
+    k->init = sh_pci_host_init;
+    k->vendor_id = PCI_VENDOR_ID_HITACHI;
+    k->device_id = PCI_DEVICE_ID_HITACHI_SH7751R;
+}
+
+static TypeInfo sh_pci_host_info = {
+    .name          = "sh_pci_host",
+    .parent        = TYPE_PCI_DEVICE,
+    .instance_size = sizeof(PCIDevice),
+    .class_init    = sh_pci_host_class_init,
+};
+
+static void sh_pci_device_class_init(ObjectClass *klass, void *data)
+{
+    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
+
+    sdc->init = sh_pci_device_init;
+}
+
+static TypeInfo sh_pci_device_info = {
+    .name          = "sh_pci",
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(SHPCIState),
+    .class_init    = sh_pci_device_class_init,
+};
+
+static void sh_pci_register_types(void)
+{
+    type_register_static(&sh_pci_device_info);
+    type_register_static(&sh_pci_host_info);
+}
+
+type_init(sh_pci_register_types)

@@ -23,9 +23,7 @@
  */
 
 #include "sysbus.h"
-
-/* debug CS4231 */
-//#define DEBUG_CS
+#include "trace.h"
 
 /*
  * In addition to Crystal CS4231 there is a DMA controller on Sparc.
@@ -37,6 +35,7 @@
 
 typedef struct CSState {
     SysBusDevice busdev;
+    MemoryRegion iomem;
     qemu_irq irq;
     uint32_t regs[CS_REGS];
     uint8_t dregs[CS_DREGS];
@@ -45,13 +44,6 @@ typedef struct CSState {
 #define CS_RAP(s) ((s)->regs[0] & CS_MAXDREG)
 #define CS_VER 0xa0
 #define CS_CDC_VER 0x8a
-
-#ifdef DEBUG_CS
-#define DPRINTF(fmt, ...)                                       \
-    do { printf("CS: " fmt , ## __VA_ARGS__); } while (0)
-#else
-#define DPRINTF(fmt, ...)
-#endif
 
 static void cs_reset(DeviceState *d)
 {
@@ -63,7 +55,8 @@ static void cs_reset(DeviceState *d)
     s->dregs[25] = CS_VER;
 }
 
-static uint32_t cs_mem_readl(void *opaque, target_phys_addr_t addr)
+static uint64_t cs_mem_read(void *opaque, hwaddr addr,
+                            unsigned size)
 {
     CSState *s = opaque;
     uint32_t saddr, ret;
@@ -79,27 +72,27 @@ static uint32_t cs_mem_readl(void *opaque, target_phys_addr_t addr)
             ret = s->dregs[CS_RAP(s)];
             break;
         }
-        DPRINTF("read dreg[%d]: 0x%8.8x\n", CS_RAP(s), ret);
+        trace_cs4231_mem_readl_dreg(CS_RAP(s), ret);
         break;
     default:
         ret = s->regs[saddr];
-        DPRINTF("read reg[%d]: 0x%8.8x\n", saddr, ret);
+        trace_cs4231_mem_readl_reg(saddr, ret);
         break;
     }
     return ret;
 }
 
-static void cs_mem_writel(void *opaque, target_phys_addr_t addr, uint32_t val)
+static void cs_mem_write(void *opaque, hwaddr addr,
+                         uint64_t val, unsigned size)
 {
     CSState *s = opaque;
     uint32_t saddr;
 
     saddr = addr >> 2;
-    DPRINTF("write reg[%d]: 0x%8.8x -> 0x%8.8x\n", saddr, s->regs[saddr], val);
+    trace_cs4231_mem_writel_reg(saddr, s->regs[saddr], val);
     switch (saddr) {
     case 1:
-        DPRINTF("write dreg[%d]: 0x%2.2x -> 0x%2.2x\n", CS_RAP(s),
-                s->dregs[CS_RAP(s)], val);
+        trace_cs4231_mem_writel_dreg(CS_RAP(s), s->dregs[CS_RAP(s)], val);
         switch(CS_RAP(s)) {
         case 11:
         case 25: // Read only
@@ -129,16 +122,10 @@ static void cs_mem_writel(void *opaque, target_phys_addr_t addr, uint32_t val)
     }
 }
 
-static CPUReadMemoryFunc * const cs_mem_read[3] = {
-    cs_mem_readl,
-    cs_mem_readl,
-    cs_mem_readl,
-};
-
-static CPUWriteMemoryFunc * const cs_mem_write[3] = {
-    cs_mem_writel,
-    cs_mem_writel,
-    cs_mem_writel,
+static const MemoryRegionOps cs_mem_ops = {
+    .read = cs_mem_read,
+    .write = cs_mem_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
 static const VMStateDescription vmstate_cs4231 = {
@@ -155,30 +142,40 @@ static const VMStateDescription vmstate_cs4231 = {
 
 static int cs4231_init1(SysBusDevice *dev)
 {
-    int io;
     CSState *s = FROM_SYSBUS(CSState, dev);
 
-    io = cpu_register_io_memory(cs_mem_read, cs_mem_write, s);
-    sysbus_init_mmio(dev, CS_SIZE, io);
+    memory_region_init_io(&s->iomem, &cs_mem_ops, s, "cs4321", CS_SIZE);
+    sysbus_init_mmio(dev, &s->iomem);
     sysbus_init_irq(dev, &s->irq);
 
     return 0;
 }
 
-static SysBusDeviceInfo cs4231_info = {
-    .init = cs4231_init1,
-    .qdev.name  = "SUNW,CS4231",
-    .qdev.size  = sizeof(CSState),
-    .qdev.vmsd  = &vmstate_cs4231,
-    .qdev.reset = cs_reset,
-    .qdev.props = (Property[]) {
-        {.name = NULL}
-    }
+static Property cs4231_properties[] = {
+    {.name = NULL},
 };
 
-static void cs4231_register_devices(void)
+static void cs4231_class_init(ObjectClass *klass, void *data)
 {
-    sysbus_register_withprop(&cs4231_info);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
+
+    k->init = cs4231_init1;
+    dc->reset = cs_reset;
+    dc->vmsd = &vmstate_cs4231;
+    dc->props = cs4231_properties;
 }
 
-device_init(cs4231_register_devices)
+static TypeInfo cs4231_info = {
+    .name          = "SUNW,CS4231",
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(CSState),
+    .class_init    = cs4231_class_init,
+};
+
+static void cs4231_register_types(void)
+{
+    type_register_static(&cs4231_info);
+}
+
+type_init(cs4231_register_types)

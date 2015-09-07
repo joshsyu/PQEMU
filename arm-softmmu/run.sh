@@ -1,0 +1,1 @@
+./qemu-system-arm -kernel /home/josh/sdb2/Lab/Linaro15.03/vmlinuz -initrd /home/josh/sdb2/Lab/Linaro15.03/initrd.img-4.0.0-1-linaro-vexpress -drive if=sd,cache=writeback,file=/home/josh/sdb2/Lab/Linaro15.03/vexpress.img -m 1024 -cpu cortex-a9 -M vexpress-a9 -serial stdio -smp 2

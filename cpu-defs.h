@@ -29,36 +29,36 @@
 #include <signal.h>
 #include "osdep.h"
 #include "qemu-queue.h"
-#include "targphys.h"
-
-#ifdef CONFIG_CPUTHREAD
+#include "hwaddr.h"
 #include "qemu-thread.h"
-#endif
-
 #ifndef TARGET_LONG_BITS
 #error TARGET_LONG_BITS must be defined before including this header
 #endif
 
 #define TARGET_LONG_SIZE (TARGET_LONG_BITS / 8)
 
+typedef int16_t target_short __attribute__ ((aligned(TARGET_SHORT_ALIGNMENT)));
+typedef uint16_t target_ushort __attribute__((aligned(TARGET_SHORT_ALIGNMENT)));
+typedef int32_t target_int __attribute__((aligned(TARGET_INT_ALIGNMENT)));
+typedef uint32_t target_uint __attribute__((aligned(TARGET_INT_ALIGNMENT)));
+typedef int64_t target_llong __attribute__((aligned(TARGET_LLONG_ALIGNMENT)));
+typedef uint64_t target_ullong __attribute__((aligned(TARGET_LLONG_ALIGNMENT)));
 /* target_ulong is the type of a virtual address */
 #if TARGET_LONG_SIZE == 4
-typedef int32_t target_long;
-typedef uint32_t target_ulong;
+typedef int32_t target_long __attribute__((aligned(TARGET_LONG_ALIGNMENT)));
+typedef uint32_t target_ulong __attribute__((aligned(TARGET_LONG_ALIGNMENT)));
 #define TARGET_FMT_lx "%08x"
 #define TARGET_FMT_ld "%d"
 #define TARGET_FMT_lu "%u"
 #elif TARGET_LONG_SIZE == 8
-typedef int64_t target_long;
-typedef uint64_t target_ulong;
+typedef int64_t target_long __attribute__((aligned(TARGET_LONG_ALIGNMENT)));
+typedef uint64_t target_ulong __attribute__((aligned(TARGET_LONG_ALIGNMENT)));
 #define TARGET_FMT_lx "%016" PRIx64
 #define TARGET_FMT_ld "%" PRId64
 #define TARGET_FMT_lu "%" PRIu64
 #else
 #error TARGET_LONG_SIZE undefined
 #endif
-
-#define HOST_LONG_SIZE (HOST_LONG_BITS / 8)
 
 #define EXCP_INTERRUPT 	0x10000 /* async interruption */
 #define EXCP_HLT        0x10001 /* hlt instruction reached */
@@ -76,10 +76,11 @@ typedef uint64_t target_ulong;
 #define TB_JMP_ADDR_MASK (TB_JMP_PAGE_SIZE - 1)
 #define TB_JMP_PAGE_MASK (TB_JMP_CACHE_SIZE - TB_JMP_PAGE_SIZE)
 
+#if !defined(CONFIG_USER_ONLY)
 #define CPU_TLB_BITS 8
 #define CPU_TLB_SIZE (1 << CPU_TLB_BITS)
 
-#if TARGET_PHYS_ADDR_BITS == 32 && TARGET_LONG_BITS == 32
+#if HOST_LONG_BITS == 32 && TARGET_LONG_BITS == 32
 #define CPU_TLB_ENTRY_BITS 4
 #else
 #define CPU_TLB_ENTRY_BITS 5
@@ -95,20 +96,31 @@ typedef struct CPUTLBEntry {
     target_ulong addr_read;
     target_ulong addr_write;
     target_ulong addr_code;
-    /* Addend to virtual address to get physical address.  IO accesses
+    /* Addend to virtual address to get host address.  IO accesses
        use the corresponding iotlb value.  */
-#if TARGET_PHYS_ADDR_BITS == 64
-    /* on i386 Linux make sure it is aligned */
-    target_phys_addr_t addend __attribute__((aligned(8)));
-#else
-    target_phys_addr_t addend;
-#endif
+    uintptr_t addend;
     /* padding to get a power of two size */
-    uint8_t dummy[(1 << CPU_TLB_ENTRY_BITS) - 
-                  (sizeof(target_ulong) * 3 + 
-                   ((-sizeof(target_ulong) * 3) & (sizeof(target_phys_addr_t) - 1)) + 
-                   sizeof(target_phys_addr_t))];
+    uint8_t dummy[(1 << CPU_TLB_ENTRY_BITS) -
+                  (sizeof(target_ulong) * 3 +
+                   ((-sizeof(target_ulong) * 3) & (sizeof(uintptr_t) - 1)) +
+                   sizeof(uintptr_t))];
 } CPUTLBEntry;
+
+extern int CPUTLBEntry_wrong_size[sizeof(CPUTLBEntry) == (1 << CPU_TLB_ENTRY_BITS) ? 1 : -1];
+
+#define CPU_COMMON_TLB \
+    /* The meaning of the MMU modes is defined in the target code. */   \
+    CPUTLBEntry tlb_table[NB_MMU_MODES][CPU_TLB_SIZE];                  \
+    hwaddr iotlb[NB_MMU_MODES][CPU_TLB_SIZE];               \
+    target_ulong tlb_flush_addr;                                        \
+    target_ulong tlb_flush_mask;
+
+#else
+
+#define CPU_COMMON_TLB
+
+#endif
+
 
 #ifdef HOST_WORDS_BIGENDIAN
 typedef struct icount_decr_u16 {
@@ -124,6 +136,7 @@ typedef struct icount_decr_u16 {
 
 struct kvm_run;
 struct KVMState;
+struct qemu_work_item;
 
 typedef struct CPUBreakpoint {
     target_ulong pc;
@@ -145,18 +158,14 @@ typedef struct CPUWatchpoint {
     /* in order to avoid passing too many arguments to the MMIO         \
        helpers, we store some rarely used information in the CPU        \
        context) */                                                      \
-    unsigned long mem_io_pc; /* host pc at which the memory was         \
-                                accessed */                             \
+    uintptr_t mem_io_pc; /* host pc at which the memory was             \
+                            accessed */                                 \
     target_ulong mem_io_vaddr; /* target virtual addr at which the      \
                                      memory was accessed */             \
     uint32_t halted; /* Nonzero if the CPU is in suspend state */       \
-    uint32_t stop;   /* Stop request */                                 \
-    uint32_t stopped; /* Artificially stopped */                        \
     uint32_t interrupt_request;                                         \
     volatile sig_atomic_t exit_request;                                 \
-    /* The meaning of the MMU modes is defined in the target code. */   \
-    CPUTLBEntry tlb_table[NB_MMU_MODES][CPU_TLB_SIZE];                  \
-    target_phys_addr_t iotlb[NB_MMU_MODES][CPU_TLB_SIZE];               \
+    CPU_COMMON_TLB                                                      \
     struct TranslationBlock *tb_jmp_cache[TB_JMP_CACHE_SIZE];           \
     /* buffer for temporaries in the code generator */                  \
     long temp_buf[CPU_TEMP_BUF_NLONGS];                                 \
@@ -185,7 +194,7 @@ typedef struct CPUWatchpoint {
     jmp_buf jmp_env;                                                    \
     int exception_index;                                                \
                                                                         \
-    CPUState *next_cpu; /* next CPU sharing TB cache */                 \
+    CPUArchState *next_cpu; /* next CPU sharing TB cache */                 \
     int cpu_index; /* CPU index (informative) */                        \
     uint32_t host_tid; /* host thread ID */                             \
     int numa_node; /* NUMA node this cpu is belonging to  */            \
@@ -195,61 +204,16 @@ typedef struct CPUWatchpoint {
     /* user data */                                                     \
     void *opaque;                                                       \
                                                                         \
-    uint32_t created;                                                   \
-    struct QemuThread *thread;                                          \
-    struct QemuCond *halt_cond;                                         \
     const char *cpu_model_str;                                          \
     struct KVMState *kvm_state;                                         \
     struct kvm_run *kvm_run;                                            \
-    int kvm_fd;
-
-#ifdef CONFIG_CPUTHREAD
-#define CPU_THREAD                                                      \
-    int wait_io_flag;                                                   \
-    volatile int unlink_flag;                                           \
-    QemuMutex qemu_global_mutex;                                        \
-    QemuMutex qemu_fair_mutex;                                          \
-    QemuCond qemu_cpu_cond;                                             \
-    QemuCond qemu_pause_cond;
-#endif
-
-#define CPU_EVENT_COUNT                                                 \
-    int event_count;							\
-    unsigned int idle;							\
-    unsigned int atomic;						\
-    unsigned int chain;							\
-    unsigned int unchain;     	                                   	\
-    unsigned int restore;                                       	\
-    unsigned int build_tb;						\
-    unsigned int find_tb;						\
-    unsigned int code_cache;						\
-    unsigned int unchain_all;						\
-    unsigned int null_next_tb;						\
-    unsigned int find_slow;
- 
-#define CPU_RDTSC_COUNT							\
-    int rdtsc_count;							\
-    int rdtsc_mode[5];							\
-    int64_t rdtsc_start[5];						\
-    int64_t idle_total;							\
-    int64_t atomic_wait;						\
-    int64_t atomic_total;						\
-    int64_t chain_wait;							\
-    int64_t chain_total;						\
-    int64_t unchain_wait;						\
-    int64_t unchain_total;						\
-    int64_t build_tb_wait;						\
-    int64_t build_tb_total;						\
-    int64_t restore_wait;						\
-    int64_t restore_total;						\
-    int64_t tlb_reset_wait;						\
-    int64_t tlb_reset_total;						\
-    int64_t smc_wait;							\
-    int64_t smc_total;							\
-    int64_t flush_wait;							\
-    int64_t flush_total;						\
-    int64_t find_tb_wait;						\
-    int64_t find_tb_total;						\
-    int64_t code_cache_total;						
-
+    int kvm_fd;                                                  
+/*#define CPU_THREAD
+    //int wait_io_flag;
+    //`volatile int unlink_flag;
+    QemuMutex qemu_global_mutex2;
+    QemuMutex qemu_fair_mutex2;
+    QemuCond qemu_cpu_cond2;
+    QemuCond qemu_pause_cond2;
+*/
 #endif

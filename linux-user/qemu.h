@@ -31,6 +31,7 @@
  * task_struct fields in the kernel
  */
 struct image_info {
+        abi_ulong       load_bias;
         abi_ulong       load_addr;
         abi_ulong       start_code;
         abi_ulong       end_code;
@@ -42,14 +43,23 @@ struct image_info {
         abi_ulong       mmap;
         abi_ulong       rss;
         abi_ulong       start_stack;
+        abi_ulong       stack_limit;
         abi_ulong       entry;
         abi_ulong       code_offset;
         abi_ulong       data_offset;
         abi_ulong       saved_auxv;
+        abi_ulong       auxv_len;
         abi_ulong       arg_start;
         abi_ulong       arg_end;
-        char            **host_argv;
+        uint32_t        elf_flags;
 	int		personality;
+#ifdef CONFIG_USE_FDPIC
+        abi_ulong       loadmap_addr;
+        uint16_t        nsegs;
+        void           *loadsegs;
+        abi_ulong       pt_dynamic_addr;
+        struct image_info *other_info;
+#endif
 };
 
 #ifdef TARGET_I386
@@ -97,6 +107,9 @@ typedef struct TaskState {
     FPA11 fpa;
     int swi_errno;
 #endif
+#ifdef TARGET_UNICORE32
+    int swi_errno;
+#endif
 #if defined(TARGET_I386) && !defined(TARGET_X86_64)
     abi_ulong target_v86;
     struct vm86_saved_state vm86_saved_regs;
@@ -110,12 +123,12 @@ typedef struct TaskState {
 #ifdef TARGET_M68K
     int sim_syscalls;
 #endif
-#if defined(TARGET_ARM) || defined(TARGET_M68K)
+#if defined(TARGET_ARM) || defined(TARGET_M68K) || defined(TARGET_UNICORE32)
     /* Extra fields for semihosted binaries.  */
-    uint32_t stack_base;
     uint32_t heap_base;
     uint32_t heap_limit;
 #endif
+    uint32_t stack_base;
     int used; /* non zero if used */
     struct image_info *info;
     struct linux_binprm *bprm;
@@ -124,8 +137,6 @@ typedef struct TaskState {
     struct sigqueue sigqueue_table[MAX_SIGQUEUE_SIZE]; /* siginfo queue */
     struct sigqueue *first_free; /* first free siginfo queue entry */
     int signal_pending; /* non zero if a signal may be pending */
-
-    uint8_t stack[0];
 } __attribute__((aligned(16))) TaskState;
 
 extern char *exec_path;
@@ -133,9 +144,7 @@ void init_task_state(TaskState *ts);
 void task_settid(TaskState *);
 void stop_all_tasks(void);
 extern const char *qemu_uname_release;
-#if defined(CONFIG_USE_GUEST_BASE)
 extern unsigned long mmap_min_addr;
-#endif
 
 /* ??? See if we can avoid exposing so much of the loader internals.  */
 /*
@@ -145,12 +154,16 @@ extern unsigned long mmap_min_addr;
  */
 #define MAX_ARG_PAGES 33
 
+/* Read a good amount of data initially, to hopefully get all the
+   program headers loaded.  */
+#define BPRM_BUF_SIZE  1024
+
 /*
  * This structure is used to hold the arguments that are
  * used when loading binaries.
  */
 struct linux_binprm {
-        char buf[128];
+        char buf[BPRM_BUF_SIZE] __attribute__((aligned));
         void *page[MAX_ARG_PAGES];
         abi_ulong p;
 	int fd;
@@ -159,7 +172,7 @@ struct linux_binprm {
         char **argv;
         char **envp;
         char * filename;        /* Name of binary */
-        int (*core_dump)(int, const CPUState *); /* coredump routine */
+        int (*core_dump)(int, const CPUArchState *); /* coredump routine */
 };
 
 void do_init_thread(struct target_pt_regs *regs, struct image_info *infop);
@@ -173,11 +186,6 @@ int load_elf_binary(struct linux_binprm * bprm, struct target_pt_regs * regs,
                     struct image_info * info);
 int load_flt_binary(struct linux_binprm * bprm, struct target_pt_regs * regs,
                     struct image_info * info);
-#ifdef TARGET_HAS_ELFLOAD32
-int load_elf_binary_multi(struct linux_binprm *bprm,
-                          struct target_pt_regs *regs,
-                          struct image_info *info);
-#endif
 
 abi_long memcpy_to_target(abi_ulong dest, const void *src,
                           unsigned long len);
@@ -186,16 +194,33 @@ abi_long do_brk(abi_ulong new_brk);
 void syscall_init(void);
 abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
                     abi_long arg2, abi_long arg3, abi_long arg4,
-                    abi_long arg5, abi_long arg6);
-void gemu_log(const char *fmt, ...) __attribute__((format(printf,1,2)));
-extern THREAD CPUState *thread_env;
-void cpu_loop(CPUState *env);
+                    abi_long arg5, abi_long arg6, abi_long arg7,
+                    abi_long arg8);
+void gemu_log(const char *fmt, ...) GCC_FMT_ATTR(1, 2);
+extern THREAD CPUArchState *thread_env;
+void cpu_loop(CPUArchState *env);
 char *target_strerror(int err);
 int get_osversion(void);
 void fork_start(void);
 void fork_end(int child);
 
+/* Creates the initial guest address space in the host memory space using
+ * the given host start address hint and size.  The guest_start parameter
+ * specifies the start address of the guest space.  guest_base will be the
+ * difference between the host start address computed by this function and
+ * guest_start.  If fixed is specified, then the mapped address space must
+ * start at host_start.  The real start address of the mapped memory space is
+ * returned or -1 if there was an error.
+ */
+unsigned long init_guest_space(unsigned long host_start,
+                               unsigned long host_size,
+                               unsigned long guest_start,
+                               bool fixed);
+
 #include "qemu-log.h"
+
+/* syscall.c */
+int host_to_target_waitstatus(int status);
 
 /* strace.c */
 void print_syscall(int num,
@@ -205,15 +230,15 @@ void print_syscall_ret(int num, abi_long arg1);
 extern int do_strace;
 
 /* signal.c */
-void process_pending_signals(CPUState *cpu_env);
+void process_pending_signals(CPUArchState *cpu_env);
 void signal_init(void);
-int queue_signal(CPUState *env, int sig, target_siginfo_t *info);
+int queue_signal(CPUArchState *env, int sig, target_siginfo_t *info);
 void host_to_target_siginfo(target_siginfo_t *tinfo, const siginfo_t *info);
 void target_to_host_siginfo(siginfo_t *info, const target_siginfo_t *tinfo);
 int target_to_host_signal(int sig);
 int host_to_target_signal(int sig);
-long do_sigreturn(CPUState *env);
-long do_rt_sigreturn(CPUState *env);
+long do_sigreturn(CPUArchState *env);
+long do_rt_sigreturn(CPUArchState *env);
 abi_long do_sigaltstack(abi_ulong uss_addr, abi_ulong uoss_addr, abi_ulong sp);
 
 #ifdef TARGET_I386
@@ -237,6 +262,7 @@ abi_long target_mremap(abi_ulong old_addr, abi_ulong old_size,
                        abi_ulong new_addr);
 int target_msync(abi_ulong start, abi_ulong len, int flags);
 extern unsigned long last_brk;
+extern abi_ulong mmap_next_start;
 void mmap_lock(void);
 void mmap_unlock(void);
 abi_ulong mmap_find_vma(abi_ulong, abi_ulong);
@@ -248,7 +274,7 @@ void mmap_fork_end(int child);
 #endif
 
 /* main.c */
-extern unsigned long x86_stack_size;
+extern unsigned long guest_stack_size;
 
 /* user access */
 
@@ -266,48 +292,29 @@ static inline int access_ok(int type, abi_ulong addr, abi_ulong size)
  * struct has been locked - usually with lock_user_struct().
  */
 #define __put_user(x, hptr)\
-({\
-    int size = sizeof(*hptr);\
-    switch(size) {\
-    case 1:\
-        *(uint8_t *)(hptr) = (uint8_t)(typeof(*hptr))(x);\
-        break;\
-    case 2:\
-        *(uint16_t *)(hptr) = tswap16((uint16_t)(typeof(*hptr))(x));\
-        break;\
-    case 4:\
-        *(uint32_t *)(hptr) = tswap32((uint32_t)(typeof(*hptr))(x));\
-        break;\
-    case 8:\
-        *(uint64_t *)(hptr) = tswap64((typeof(*hptr))(x));\
-        break;\
-    default:\
-        abort();\
+({ __typeof(*hptr) pu_ = (x);\
+    switch(sizeof(*hptr)) {\
+    case 1: break;\
+    case 2: pu_ = tswap16(pu_); break; \
+    case 4: pu_ = tswap32(pu_); break; \
+    case 8: pu_ = tswap64(pu_); break; \
+    default: abort();\
     }\
+    memcpy(hptr, &pu_, sizeof(pu_)); \
     0;\
 })
 
 #define __get_user(x, hptr) \
-({\
-    int size = sizeof(*hptr);\
-    switch(size) {\
-    case 1:\
-        x = (typeof(*hptr))*(uint8_t *)(hptr);\
-        break;\
-    case 2:\
-        x = (typeof(*hptr))tswap16(*(uint16_t *)(hptr));\
-        break;\
-    case 4:\
-        x = (typeof(*hptr))tswap32(*(uint32_t *)(hptr));\
-        break;\
-    case 8:\
-        x = (typeof(*hptr))tswap64(*(uint64_t *)(hptr));\
-        break;\
-    default:\
-        /* avoid warning */\
-        x = 0;\
-        abort();\
+({ __typeof(*hptr) gu_; \
+    memcpy(&gu_, hptr, sizeof(gu_)); \
+    switch(sizeof(*hptr)) {\
+    case 1: break; \
+    case 2: gu_ = tswap16(gu_); break; \
+    case 4: gu_ = tswap32(gu_); break; \
+    case 8: gu_ = tswap64(gu_); break; \
+    default: abort();\
     }\
+    (x) = gu_; \
     0;\
 })
 
@@ -375,7 +382,7 @@ abi_long copy_from_user(void *hptr, abi_ulong gaddr, size_t len);
 abi_long copy_to_user(abi_ulong gaddr, void *hptr, size_t len);
 
 /* Functions for accessing guest memory.  The tget and tput functions
-   read/write single values, byteswapping as neccessary.  The lock_user
+   read/write single values, byteswapping as necessary.  The lock_user
    gets a pointer to a contiguous area of guest memory, but does not perform
    and byteswapping.  lock_user may return either a pointer to the guest
    memory, or a temporary buffer.  */

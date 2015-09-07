@@ -9,6 +9,8 @@
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
  *
+ * Contributions after 2012-01-13 are licensed under the terms of the
+ * GNU GPL, version 2 or (at your option) any later version.
  */
 
 #include "qemu-common.h"
@@ -16,7 +18,6 @@
 #include "migration.h"
 #include "monitor.h"
 #include "qemu-char.h"
-#include "sysemu.h"
 #include "buffered_file.h"
 #include "block.h"
 #include "qemu_socket.h"
@@ -24,120 +25,87 @@
 //#define DEBUG_MIGRATION_FD
 
 #ifdef DEBUG_MIGRATION_FD
-#define dprintf(fmt, ...) \
+#define DPRINTF(fmt, ...) \
     do { printf("migration-fd: " fmt, ## __VA_ARGS__); } while (0)
 #else
-#define dprintf(fmt, ...) \
+#define DPRINTF(fmt, ...) \
     do { } while (0)
 #endif
 
-static int fd_errno(FdMigrationState *s)
+static int fd_errno(MigrationState *s)
 {
     return errno;
 }
 
-static int fd_write(FdMigrationState *s, const void * buf, size_t size)
+static int fd_write(MigrationState *s, const void * buf, size_t size)
 {
     return write(s->fd, buf, size);
 }
 
-static int fd_close(FdMigrationState *s)
+static int fd_close(MigrationState *s)
 {
-    dprintf("fd_close\n");
-    if (s->fd != -1) {
-        close(s->fd);
-        s->fd = -1;
+    struct stat st;
+    int ret;
+
+    DPRINTF("fd_close\n");
+    ret = fstat(s->fd, &st);
+    if (ret == 0 && S_ISREG(st.st_mode)) {
+        /*
+         * If the file handle is a regular file make sure the
+         * data is flushed to disk before signaling success.
+         */
+        ret = fsync(s->fd);
+        if (ret != 0) {
+            ret = -errno;
+            perror("migration-fd: fsync");
+            return ret;
+        }
     }
-    return 0;
+    ret = close(s->fd);
+    s->fd = -1;
+    if (ret != 0) {
+        ret = -errno;
+        perror("migration-fd: close");
+    }
+    return ret;
 }
 
-MigrationState *fd_start_outgoing_migration(Monitor *mon,
-					    const char *fdname,
-					    int64_t bandwidth_limit,
-					    int detach,
-					    int blk,
-					    int inc)
+void fd_start_outgoing_migration(MigrationState *s, const char *fdname, Error **errp)
 {
-    FdMigrationState *s;
-
-    s = qemu_mallocz(sizeof(*s));
-
-    s->fd = monitor_get_fd(mon, fdname);
+    s->fd = monitor_get_fd(cur_mon, fdname, errp);
     if (s->fd == -1) {
-        dprintf("fd_migration: invalid file descriptor identifier\n");
-        goto err_after_alloc;
+        return;
     }
 
-    if (fcntl(s->fd, F_SETFL, O_NONBLOCK) == -1) {
-        dprintf("Unable to set nonblocking mode on file descriptor\n");
-        goto err_after_open;
-    }
-
+    fcntl(s->fd, F_SETFL, O_NONBLOCK);
     s->get_error = fd_errno;
     s->write = fd_write;
     s->close = fd_close;
-    s->mig_state.cancel = migrate_fd_cancel;
-    s->mig_state.get_status = migrate_fd_get_status;
-    s->mig_state.release = migrate_fd_release;
-
-    s->mig_state.blk = blk;
-    s->mig_state.shared = inc;
-
-    s->state = MIG_STATE_ACTIVE;
-    s->mon = NULL;
-    s->bandwidth_limit = bandwidth_limit;
-
-    if (!detach) {
-        migrate_fd_monitor_suspend(s, mon);
-    }
 
     migrate_fd_connect(s);
-    return &s->mig_state;
-
-err_after_open:
-    close(s->fd);
-err_after_alloc:
-    qemu_free(s);
-    return NULL;
 }
 
 static void fd_accept_incoming_migration(void *opaque)
 {
     QEMUFile *f = opaque;
-    int ret;
 
-    ret = qemu_loadvm_state(f);
-    if (ret < 0) {
-        fprintf(stderr, "load of migration failed\n");
-        goto err;
-    }
-    qemu_announce_self();
-    dprintf("successfully loaded vm state\n");
-    /* we've successfully migrated, close the fd */
-    qemu_set_fd_handler2(qemu_stdio_fd(f), NULL, NULL, NULL, NULL);
-    if (autostart)
-        vm_start();
-
-err:
-    qemu_fclose(f);
+    qemu_set_fd_handler2(qemu_get_fd(f), NULL, NULL, NULL, NULL);
+    process_incoming_migration(f);
 }
 
-int fd_start_incoming_migration(const char *infd)
+void fd_start_incoming_migration(const char *infd, Error **errp)
 {
     int fd;
     QEMUFile *f;
 
-    dprintf("Attempting to start an incoming migration via fd\n");
+    DPRINTF("Attempting to start an incoming migration via fd\n");
 
     fd = strtol(infd, NULL, 0);
     f = qemu_fdopen(fd, "rb");
     if(f == NULL) {
-        dprintf("Unable to apply qemu wrapper to file descriptor\n");
-        return -errno;
+        error_setg_errno(errp, errno, "failed to open the source descriptor");
+        return;
     }
 
-    qemu_set_fd_handler2(fd, NULL, fd_accept_incoming_migration, NULL,
-			 (void *)(unsigned long)f);
-
-    return 0;
+    qemu_set_fd_handler2(fd, NULL, fd_accept_incoming_migration, NULL, f);
 }

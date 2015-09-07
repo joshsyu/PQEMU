@@ -31,7 +31,7 @@ int tap_open(char *ifname, int ifname_size, int *vnet_hdr, int vnet_hdr_required
     return -1;
 }
 
-int tap_set_sndbuf(int fd, QemuOpts *opts)
+int tap_set_sndbuf(int fd, const NetdevTapOptions *tap)
 {
     return 0;
 }
@@ -44,6 +44,15 @@ int tap_probe_vnet_hdr(int fd)
 int tap_probe_has_ufo(int fd)
 {
     return 0;
+}
+
+int tap_probe_vnet_hdr_len(int fd, int len)
+{
+    return 0;
+}
+
+void tap_fd_set_vnet_hdr_len(int fd, int len)
+{
 }
 
 void tap_fd_set_offload(int fd, int csum, int tso4,

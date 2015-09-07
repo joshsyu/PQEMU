@@ -9,16 +9,19 @@
 #include "config.h" // CONFIG_*
 #include "usb.h" // usb_ctrlrequest
 #include "biosvar.h" // GET_GLOBAL
+#include "ps2port.h" // ATKBD_CMD_GETID
 
 struct usb_pipe *keyboard_pipe VAR16VISIBLE;
+struct usb_pipe *mouse_pipe VAR16VISIBLE;
 
 
 /****************************************************************
  * Setup
  ****************************************************************/
 
+// Send USB HID protocol message.
 static int
-set_protocol(u32 endp, u16 val)
+set_protocol(struct usb_pipe *pipe, u16 val)
 {
     struct usb_ctrlrequest req;
     req.bRequestType = USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE;
@@ -26,73 +29,107 @@ set_protocol(u32 endp, u16 val)
     req.wValue = val;
     req.wIndex = 0;
     req.wLength = 0;
-    return send_default_control(endp, &req, NULL);
+    return send_default_control(pipe, &req, NULL);
 }
 
+// Send USB HID SetIdle request.
 static int
-set_idle(u32 endp, u8 val)
+set_idle(struct usb_pipe *pipe, int ms)
 {
     struct usb_ctrlrequest req;
     req.bRequestType = USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE;
     req.bRequest = HID_REQ_SET_IDLE;
-    req.wValue = val<<8;
+    req.wValue = (ms/4)<<8;
     req.wIndex = 0;
     req.wLength = 0;
-    return send_default_control(endp, &req, NULL);
+    return send_default_control(pipe, &req, NULL);
 }
 
-int
-usb_keyboard_init(u32 endp, struct usb_interface_descriptor *iface, int imax)
+#define KEYREPEATWAITMS 500
+#define KEYREPEATMS 33
+
+static int
+usb_kbd_init(struct usbdevice_s *usbdev
+             , struct usb_endpoint_descriptor *epdesc)
 {
     if (! CONFIG_USB_KEYBOARD)
         return -1;
     if (keyboard_pipe)
         // XXX - this enables the first found keyboard (could be random)
         return -1;
-    dprintf(2, "usb_keyboard_setup %x\n", endp);
 
-    struct usb_endpoint_descriptor *epdesc = (void*)&iface[1];
-    for (;;) {
-        if ((void*)epdesc >= (void*)iface + imax
-            || epdesc->bDescriptorType == USB_DT_INTERFACE) {
-            dprintf(1, "No keyboard intr in?\n");
-            return -1;
-        }
-        if (epdesc->bDescriptorType == USB_DT_ENDPOINT
-            && (epdesc->bEndpointAddress & USB_ENDPOINT_DIR_MASK) == USB_DIR_IN
-            && ((epdesc->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK)
-                == USB_ENDPOINT_XFER_INT)
-            && epdesc->wMaxPacketSize == 8)
-            break;
-        epdesc = (void*)epdesc + epdesc->bLength;
-    }
-    u32 inendp = mkendp(endp2cntl(endp), endp2devaddr(endp)
-                        , epdesc->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK
-                        , endp2speed(endp), epdesc->wMaxPacketSize);
+    if (epdesc->wMaxPacketSize != 8)
+        return -1;
 
     // Enable "boot" protocol.
-    int ret = set_protocol(endp, 1);
+    int ret = set_protocol(usbdev->defpipe, 0);
     if (ret)
         return -1;
-    // Only send reports on a new key event.
-    ret = set_idle(endp, 0);
+    // Periodically send reports to enable key repeat.
+    ret = set_idle(usbdev->defpipe, KEYREPEATMS);
     if (ret)
         return -1;
 
-    struct usb_pipe *pipe = alloc_intr_pipe(inendp, epdesc->bInterval);
-    if (!pipe)
+    keyboard_pipe = usb_alloc_pipe(usbdev, epdesc);
+    if (!keyboard_pipe)
         return -1;
-    keyboard_pipe = pipe;
 
+    dprintf(1, "USB keyboard initialized\n");
     return 0;
 }
 
-void
-usb_keyboard_setup()
+static int
+usb_mouse_init(struct usbdevice_s *usbdev
+               , struct usb_endpoint_descriptor *epdesc)
 {
-    if (! CONFIG_USB_KEYBOARD)
-        return;
-    keyboard_pipe = NULL;
+    if (! CONFIG_USB_MOUSE)
+        return -1;
+    if (mouse_pipe)
+        // XXX - this enables the first found mouse (could be random)
+        return -1;
+
+    if (epdesc->wMaxPacketSize < 3 || epdesc->wMaxPacketSize > 8)
+        return -1;
+
+    // Enable "boot" protocol.
+    int ret = set_protocol(usbdev->defpipe, 0);
+    if (ret)
+        return -1;
+
+    mouse_pipe = usb_alloc_pipe(usbdev, epdesc);
+    if (!mouse_pipe)
+        return -1;
+
+    dprintf(1, "USB mouse initialized\n");
+    return 0;
+}
+
+// Initialize a found USB HID device (if applicable).
+int
+usb_hid_init(struct usbdevice_s *usbdev)
+{
+    if (! CONFIG_USB_KEYBOARD || ! CONFIG_USB_MOUSE)
+        return -1;
+    dprintf(2, "usb_hid_init %p\n", usbdev->defpipe);
+
+    struct usb_interface_descriptor *iface = usbdev->iface;
+    if (iface->bInterfaceSubClass != USB_INTERFACE_SUBCLASS_BOOT)
+        // Doesn't support boot protocol.
+        return -1;
+
+    // Find intr in endpoint.
+    struct usb_endpoint_descriptor *epdesc = findEndPointDesc(
+        usbdev, USB_ENDPOINT_XFER_INT, USB_DIR_IN);
+    if (!epdesc) {
+        dprintf(1, "No usb hid intr in?\n");
+        return -1;
+    }
+
+    if (iface->bInterfaceProtocol == USB_INTERFACE_PROTOCOL_KEYBOARD)
+        return usb_kbd_init(usbdev, epdesc);
+    if (iface->bInterfaceProtocol == USB_INTERFACE_PROTOCOL_MOUSE)
+        return usb_mouse_init(usbdev, epdesc);
+    return -1;
 }
 
 
@@ -100,6 +137,7 @@ usb_keyboard_setup()
  * Keyboard events
  ****************************************************************/
 
+// Mapping from USB key id to ps2 key sequence.
 static u16 KeyToScanCode[] VAR16 = {
     0x0000, 0x0000, 0x0000, 0x0000, 0x001e, 0x0030, 0x002e, 0x0020,
     0x0012, 0x0021, 0x0022, 0x0023, 0x0017, 0x0024, 0x0025, 0x0026,
@@ -116,17 +154,22 @@ static u16 KeyToScanCode[] VAR16 = {
     0x0048, 0x0049, 0x0052, 0x0053
 };
 
+// Mapping from USB modifier id to ps2 key sequence.
 static u16 ModifierToScanCode[] VAR16 = {
     //lcntl, lshift, lalt, lgui, rcntl, rshift, ralt, rgui
     0x001d, 0x002a, 0x0038, 0xe05b, 0xe01d, 0x0036, 0xe038, 0xe05c
 };
 
+#define RELEASEBIT 0x80
+
+// Format of USB keyboard event data
 struct keyevent {
     u8 modifiers;
     u8 reserved;
     u8 keys[6];
 };
 
+// Translate data from KeyToScanCode[] to calls to process_key().
 static void
 prockeys(u16 keys)
 {
@@ -135,8 +178,8 @@ prockeys(u16 keys)
         if (key == 0xe1) {
             // Pause key
             process_key(0xe1);
-            process_key(0x1d | (keys & 0x80));
-            process_key(0x45 | (keys & 0x80));
+            process_key(0x1d | (keys & RELEASEBIT));
+            process_key(0x45 | (keys & RELEASEBIT));
             return;
         }
         process_key(key);
@@ -144,31 +187,109 @@ prockeys(u16 keys)
     process_key(keys);
 }
 
+// Handle a USB key press/release event.
+static void
+procscankey(u8 key, u8 flags)
+{
+    if (key >= ARRAY_SIZE(KeyToScanCode))
+        return;
+    u16 keys = GET_GLOBAL(KeyToScanCode[key]);
+    if (keys)
+        prockeys(keys | flags);
+}
+
+// Handle a USB modifier press/release event.
+static void
+procmodkey(u8 mods, u8 flags)
+{
+    int i;
+    for (i=0; mods; i++)
+        if (mods & (1<<i)) {
+            // Modifier key change.
+            prockeys(GET_GLOBAL(ModifierToScanCode[i]) | flags);
+            mods &= ~(1<<i);
+        }
+}
+
+struct usbkeyinfo {
+    union {
+        struct {
+            u8 modifiers;
+            u8 repeatcount;
+            u8 keys[6];
+        };
+        u64 data;
+    };
+};
+struct usbkeyinfo LastUSBkey VARLOW;
+
+// Process USB keyboard data.
 static void
 handle_key(struct keyevent *data)
 {
-    dprintf(5, "Got key %x %x\n", data->modifiers, data->keys[0]);
-    // XXX
+    dprintf(9, "Got key %x %x\n", data->modifiers, data->keys[0]);
+
+    // Load old keys.
+    struct usbkeyinfo old;
+    old.data = GET_LOW(LastUSBkey.data);
+
+    // Check for keys no longer pressed.
+    int addpos = 0;
     int i;
-    for (i=0; i<8; i++)
-        if (data->modifiers & (1<<i))
-            prockeys(GET_GLOBAL(ModifierToScanCode[i]));
+    for (i=0; i<ARRAY_SIZE(old.keys); i++) {
+        u8 key = old.keys[i];
+        if (!key)
+            break;
+        int j;
+        for (j=0;; j++) {
+            if (j>=ARRAY_SIZE(data->keys)) {
+                // Key released.
+                procscankey(key, RELEASEBIT);
+                if (i+1 >= ARRAY_SIZE(old.keys) || !old.keys[i+1])
+                    // Last pressed key released - disable repeat.
+                    old.repeatcount = 0xff;
+                break;
+            }
+            if (data->keys[j] == key) {
+                // Key still pressed.
+                data->keys[j] = 0;
+                old.keys[addpos++] = key;
+                break;
+            }
+        }
+    }
+    procmodkey(old.modifiers & ~data->modifiers, RELEASEBIT);
+
+    // Process new keys
+    procmodkey(data->modifiers & ~old.modifiers, 0);
+    old.modifiers = data->modifiers;
     for (i=0; i<ARRAY_SIZE(data->keys); i++) {
         u8 key = data->keys[i];
-        if (key >= ARRAY_SIZE(KeyToScanCode))
-            continue;
-        key = GET_GLOBAL(KeyToScanCode[key]);
         if (!key)
             continue;
-        prockeys(key);
+        // New key pressed.
+        procscankey(key, 0);
+        old.keys[addpos++] = key;
+        old.repeatcount = KEYREPEATWAITMS / KEYREPEATMS + 1;
     }
-    for (i=0; i<8; i++)
-        if (data->modifiers & (1<<i))
-            prockeys(GET_GLOBAL(ModifierToScanCode[i]) | 0x80);
+    if (addpos < ARRAY_SIZE(old.keys))
+        old.keys[addpos] = 0;
+
+    // Check for key repeat event.
+    if (addpos) {
+        if (!old.repeatcount)
+            procscankey(old.keys[addpos-1], 0);
+        else if (old.repeatcount != 0xff)
+            old.repeatcount--;
+    }
+
+    // Update old keys
+    SET_LOW(LastUSBkey.data, old.data);
 }
 
-void
-usb_check_key()
+// Check if a USB keyboard event is pending and process it if so.
+static void
+usb_check_key(void)
 {
     if (! CONFIG_USB_KEYBOARD)
         return;
@@ -183,4 +304,128 @@ usb_check_key()
             break;
         handle_key(&data);
     }
+}
+
+// Test if USB keyboard is active.
+inline int
+usb_kbd_active(void)
+{
+    if (! CONFIG_USB_KEYBOARD)
+        return 0;
+    return GET_GLOBAL(keyboard_pipe) != NULL;
+}
+
+// Handle a ps2 style keyboard command.
+inline int
+usb_kbd_command(int command, u8 *param)
+{
+    if (! CONFIG_USB_KEYBOARD)
+        return -1;
+    dprintf(9, "usb keyboard cmd=%x\n", command);
+    switch (command) {
+    case ATKBD_CMD_GETID:
+        // Return the id of a standard AT keyboard.
+        param[0] = 0xab;
+        param[1] = 0x83;
+        return 0;
+    default:
+        return -1;
+    }
+}
+
+
+/****************************************************************
+ * Mouse events
+ ****************************************************************/
+
+// Format of USB mouse event data
+struct mouseevent {
+    u8 buttons;
+    u8 x, y;
+    u8 reserved[5];
+};
+
+// Process USB mouse data.
+static void
+handle_mouse(struct mouseevent *data)
+{
+    dprintf(9, "Got mouse b=%x x=%x y=%x\n", data->buttons, data->x, data->y);
+
+    s8 x = data->x, y = -data->y;
+    u8 flag = ((data->buttons & 0x7) | (1<<3)
+               | (x & 0x80 ? (1<<4) : 0) | (y & 0x80 ? (1<<5) : 0));
+    process_mouse(flag);
+    process_mouse(x);
+    process_mouse(y);
+}
+
+// Check if a USB mouse event is pending and process it if so.
+static void
+usb_check_mouse(void)
+{
+    if (! CONFIG_USB_MOUSE)
+        return;
+    struct usb_pipe *pipe = GET_GLOBAL(mouse_pipe);
+    if (!pipe)
+        return;
+
+    for (;;) {
+        struct mouseevent data;
+        int ret = usb_poll_intr(pipe, &data);
+        if (ret)
+            break;
+        handle_mouse(&data);
+    }
+}
+
+// Test if USB mouse is active.
+inline int
+usb_mouse_active(void)
+{
+    if (! CONFIG_USB_MOUSE)
+        return 0;
+    return GET_GLOBAL(mouse_pipe) != NULL;
+}
+
+// Handle a ps2 style mouse command.
+inline int
+usb_mouse_command(int command, u8 *param)
+{
+    if (! CONFIG_USB_MOUSE)
+        return -1;
+    dprintf(9, "usb mouse cmd=%x\n", command);
+    switch (command) {
+    case PSMOUSE_CMD_ENABLE:
+    case PSMOUSE_CMD_DISABLE:
+    case PSMOUSE_CMD_SETSCALE11:
+        return 0;
+    case PSMOUSE_CMD_SETSCALE21:
+    case PSMOUSE_CMD_SETRATE:
+    case PSMOUSE_CMD_SETRES:
+        // XXX
+        return 0;
+    case PSMOUSE_CMD_RESET_BAT:
+    case PSMOUSE_CMD_GETID:
+        // Return the id of a standard AT mouse.
+        param[0] = 0xaa;
+        param[1] = 0x00;
+        return 0;
+
+    case PSMOUSE_CMD_GETINFO:
+        param[0] = 0x00;
+        param[1] = 4;
+        param[2] = 100;
+        return 0;
+
+    default:
+        return -1;
+    }
+}
+
+// Check for USB events pending - called periodically from timer interrupt.
+void
+usb_check_event(void)
+{
+    usb_check_key();
+    usb_check_mouse();
 }

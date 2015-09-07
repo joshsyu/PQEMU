@@ -8,32 +8,39 @@
 #include "disk.h" // cdrom_13
 #include "util.h" // memset
 #include "bregs.h" // struct bregs
-#include "biosvar.h" // GET_EBDA
+#include "biosvar.h" // GET_GLOBAL
 #include "ata.h" // ATA_CMD_REQUEST_SENSE
+#include "blockcmd.h" // CDB_CMD_REQUEST_SENSE
+
+// Locks for removable devices
+u8 CDRom_locks[CONFIG_MAX_EXTDRIVE] VARLOW;
 
 
 /****************************************************************
  * CD emulation
  ****************************************************************/
 
+struct cdemu_s CDEmu VARLOW;
+struct drive_s *cdemu_drive_gf VAR16VISIBLE;
+
 static int
 cdemu_read(struct disk_op_s *op)
 {
-    u16 ebda_seg = get_ebda_seg();
-    struct drive_s *drive_g = GET_EBDA2(ebda_seg, cdemu.emulated_drive);
+    struct drive_s *drive_g;
+    drive_g = GLOBALFLAT2GLOBAL(GET_LOW(CDEmu.emulated_drive_gf));
     struct disk_op_s dop;
     dop.drive_g = drive_g;
     dop.command = op->command;
-    dop.lba = GET_EBDA2(ebda_seg, cdemu.ilba) + op->lba / 4;
+    dop.lba = GET_LOW(CDEmu.ilba) + op->lba / 4;
 
     int count = op->count;
     op->count = 0;
-    u8 *cdbuf_far = (void*)offsetof(struct extended_bios_data_area_s, cdemu_buf);
+    u8 *cdbuf_fl = GET_GLOBAL(bounce_buf_fl);
 
     if (op->lba & 3) {
         // Partial read of first block.
         dop.count = 1;
-        dop.buf_fl = MAKE_FLATPTR(ebda_seg, cdbuf_far);
+        dop.buf_fl = cdbuf_fl;
         int ret = process_op(&dop);
         if (ret)
             return ret;
@@ -41,10 +48,7 @@ cdemu_read(struct disk_op_s *op)
         if (thiscount > count)
             thiscount = count;
         count -= thiscount;
-        memcpy_far(FLATPTR_TO_SEG(op->buf_fl)
-                   , (void*)FLATPTR_TO_OFFSET(op->buf_fl)
-                   , ebda_seg, cdbuf_far + (op->lba & 3) * 512
-                   , thiscount * 512);
+        memcpy_fl(op->buf_fl, cdbuf_fl + (op->lba & 3) * 512, thiscount * 512);
         op->buf_fl += thiscount * 512;
         op->count += thiscount;
         dop.lba++;
@@ -67,14 +71,12 @@ cdemu_read(struct disk_op_s *op)
     if (count) {
         // Partial read on last block.
         dop.count = 1;
-        dop.buf_fl = MAKE_FLATPTR(ebda_seg, cdbuf_far);
+        dop.buf_fl = cdbuf_fl;
         int ret = process_op(&dop);
         if (ret)
             return ret;
         u8 thiscount = count;
-        memcpy_far(FLATPTR_TO_SEG(op->buf_fl)
-                   , (void*)FLATPTR_TO_OFFSET(op->buf_fl)
-                   , ebda_seg, cdbuf_far, thiscount * 512);
+        memcpy_fl(op->buf_fl, cdbuf_fl, thiscount * 512);
         op->count += thiscount;
     }
 
@@ -104,20 +106,24 @@ process_cdemu_op(struct disk_op_s *op)
     }
 }
 
-struct drive_s *cdemu_drive VAR16VISIBLE;
-
 void
-cdemu_setup()
+cdemu_setup(void)
 {
     if (!CONFIG_CDROM_EMU)
         return;
+    if (!CDCount)
+        return;
+    if (bounce_buf_init() < 0)
+        return;
 
-    struct drive_s *drive_g = allocDrive();
+    struct drive_s *drive_g = malloc_fseg(sizeof(*drive_g));
     if (!drive_g) {
-        cdemu_drive = NULL;
+        warn_noalloc();
+        free(drive_g);
         return;
     }
-    cdemu_drive = ADJUST_GLOBAL_PTR(drive_g);
+    cdemu_drive_gf = drive_g;
+    memset(drive_g, 0, sizeof(*drive_g));
     drive_g->type = DTYPE_CDEMU;
     drive_g->blksize = DISK_SECTOR_SIZE;
     drive_g->sectors = (u64)-1;
@@ -146,27 +152,29 @@ void
 cdemu_134b(struct bregs *regs)
 {
     // FIXME ElTorito Hardcoded
-    u16 ebda_seg = get_ebda_seg();
     SET_INT13ET(regs, size, 0x13);
-    SET_INT13ET(regs, media, GET_EBDA2(ebda_seg, cdemu.media));
-    SET_INT13ET(regs, emulated_drive
-                , GET_EBDA2(ebda_seg, cdemu.emulated_extdrive));
-    struct drive_s *drive_g = GET_EBDA2(ebda_seg, cdemu.emulated_drive);
-    u8 cntl_id = GET_GLOBAL(drive_g->cntl_id);
+    SET_INT13ET(regs, media, GET_LOW(CDEmu.media));
+    SET_INT13ET(regs, emulated_drive, GET_LOW(CDEmu.emulated_extdrive));
+    struct drive_s *drive_gf = GET_LOW(CDEmu.emulated_drive_gf);
+    u8 cntl_id = 0;
+    if (drive_gf)
+        cntl_id = GET_GLOBALFLAT(drive_gf->cntl_id);
     SET_INT13ET(regs, controller_index, cntl_id / 2);
     SET_INT13ET(regs, device_spec, cntl_id % 2);
-    SET_INT13ET(regs, ilba, GET_EBDA2(ebda_seg, cdemu.ilba));
-    SET_INT13ET(regs, buffer_segment, GET_EBDA2(ebda_seg, cdemu.buffer_segment));
-    SET_INT13ET(regs, load_segment, GET_EBDA2(ebda_seg, cdemu.load_segment));
-    SET_INT13ET(regs, sector_count, GET_EBDA2(ebda_seg, cdemu.sector_count));
-    SET_INT13ET(regs, cylinders, GET_EBDA2(ebda_seg, cdemu.lchs.cylinders));
-    SET_INT13ET(regs, sectors, GET_EBDA2(ebda_seg, cdemu.lchs.spt));
-    SET_INT13ET(regs, heads, GET_EBDA2(ebda_seg, cdemu.lchs.heads));
+    SET_INT13ET(regs, ilba, GET_LOW(CDEmu.ilba));
+    SET_INT13ET(regs, buffer_segment, GET_LOW(CDEmu.buffer_segment));
+    SET_INT13ET(regs, load_segment, GET_LOW(CDEmu.load_segment));
+    SET_INT13ET(regs, sector_count, GET_LOW(CDEmu.sector_count));
+    SET_INT13ET(regs, cylinders, GET_LOW(CDEmu.lchs.cylinders));
+    SET_INT13ET(regs, sectors, GET_LOW(CDEmu.lchs.spt));
+    SET_INT13ET(regs, heads, GET_LOW(CDEmu.lchs.heads));
 
     // If we have to terminate emulation
     if (regs->al == 0x00) {
         // FIXME ElTorito Various. Should be handled accordingly to spec
-        SET_EBDA2(ebda_seg, cdemu.active, 0x00); // bye bye
+        SET_LOW(CDEmu.active, 0x00); // bye bye
+
+        // XXX - update floppy/hd count.
     }
 
     disk_ret(regs, DISK_RET_SUCCESS);
@@ -177,118 +185,27 @@ cdemu_134b(struct bregs *regs)
  * CD booting
  ****************************************************************/
 
-// Request SENSE
-static int
-atapi_get_sense(struct drive_s *drive_g, u8 *asc, u8 *ascq)
-{
-    u8 atacmd[12], buffer[18];
-    memset(atacmd, 0, sizeof(atacmd));
-    atacmd[0] = ATA_CMD_REQUEST_SENSE;
-    atacmd[4] = sizeof(buffer);
-    int ret = ata_cmd_packet(drive_g, atacmd, sizeof(atacmd), sizeof(buffer)
-                             , MAKE_FLATPTR(GET_SEG(SS), buffer));
-    if (ret)
-        return ret;
-
-    *asc = buffer[12];
-    *ascq = buffer[13];
-
-    return 0;
-}
-
-// Request capacity
-static int
-atapi_read_capacity(struct drive_s *drive_g, u32 *blksize, u32 *sectors)
-{
-    u8 packet[12], buf[8];
-    memset(packet, 0, sizeof(packet));
-    packet[0] = 0x25; /* READ CAPACITY */
-    int ret = ata_cmd_packet(drive_g, packet, sizeof(packet), sizeof(buf)
-                             , MAKE_FLATPTR(GET_SEG(SS), buf));
-    if (ret)
-        return ret;
-
-    *blksize = (((u32)buf[4] << 24) | ((u32)buf[5] << 16)
-                | ((u32)buf[6] << 8) | ((u32)buf[7] << 0));
-    *sectors = (((u32)buf[0] << 24) | ((u32)buf[1] << 16)
-                | ((u32)buf[2] << 8) | ((u32)buf[3] << 0));
-
-    return 0;
-}
-
-static int
-atapi_is_ready(struct drive_s *drive_g)
-{
-    dprintf(6, "atapi_is_ready (drive=%p)\n", drive_g);
-
-    /* Retry READ CAPACITY for 5 seconds unless MEDIUM NOT PRESENT is
-     * reported by the device.  If the device reports "IN PROGRESS",
-     * 30 seconds is added. */
-    u32 blksize, sectors;
-    int in_progress = 0;
-    u64 end = calc_future_tsc(5000);
-    for (;;) {
-        if (check_time(end)) {
-            dprintf(1, "read capacity failed\n");
-            return -1;
-        }
-
-        int ret = atapi_read_capacity(drive_g, &blksize, &sectors);
-        if (!ret)
-            // Success
-            break;
-
-        u8 asc, ascq;
-        ret = atapi_get_sense(drive_g, &asc, &ascq);
-        if (ret)
-            // Error - retry.
-            continue;
-
-        // Sense succeeded.
-        if (asc == 0x3a) { /* MEDIUM NOT PRESENT */
-            dprintf(1, "Device reports MEDIUM NOT PRESENT\n");
-            return -1;
-        }
-
-        if (asc == 0x04 && ascq == 0x01 && !in_progress) {
-            /* IN PROGRESS OF BECOMING READY */
-            printf("Waiting for device to detect medium... ");
-            /* Allow 30 seconds more */
-            end = calc_future_tsc(30000);
-            in_progress = 1;
-        }
-    }
-
-    if (blksize != GET_GLOBAL(drive_g->blksize)) {
-        printf("Unsupported sector size %u\n", blksize);
-        return -1;
-    }
-
-    dprintf(6, "sectors=%u\n", sectors);
-    printf("%dMB medium detected\n", sectors>>(20-11));
-    return 0;
-}
-
 int
-cdrom_boot(int cdid)
+cdrom_boot(struct drive_s *drive_g)
 {
-    struct drive_s *drive_g = getDrive(EXTTYPE_CD, cdid);
-    if (!drive_g)
-        return 1;
-
-    int ret = atapi_is_ready(drive_g);
-    if (ret)
-        dprintf(1, "atapi_is_ready returned %d\n", ret);
-
-    // Read the Boot Record Volume Descriptor
-    u8 buffer[2048];
+    ASSERT32FLAT();
     struct disk_op_s dop;
+    int cdid = getDriveId(EXTTYPE_CD, drive_g);
     memset(&dop, 0, sizeof(dop));
     dop.drive_g = drive_g;
+    if (!dop.drive_g || cdid < 0)
+        return 1;
+
+    int ret = scsi_is_ready(&dop);
+    if (ret)
+        dprintf(1, "scsi_is_ready returned %d\n", ret);
+
+    // Read the Boot Record Volume Descriptor
+    u8 buffer[CDROM_SECTOR_SIZE];
     dop.lba = 0x11;
     dop.count = 1;
-    dop.buf_fl = MAKE_FLATPTR(GET_SEG(SS), buffer);
-    ret = cdrom_read(&dop);
+    dop.buf_fl = buffer;
+    ret = cdb_read(&dop);
     if (ret)
         return 3;
 
@@ -303,7 +220,8 @@ cdrom_boot(int cdid)
 
     // And we read the Boot Catalog
     dop.lba = lba;
-    ret = cdrom_read(&dop);
+    dop.count = 1;
+    ret = cdb_read(&dop);
     if (ret)
         return 7;
 
@@ -321,69 +239,69 @@ cdrom_boot(int cdid)
     if (buffer[0x20] != 0x88)
         return 11; // Bootable
 
-    u16 ebda_seg = get_ebda_seg();
     u8 media = buffer[0x21];
-    SET_EBDA2(ebda_seg, cdemu.media, media);
+    CDEmu.media = media;
 
-    SET_EBDA2(ebda_seg, cdemu.emulated_drive, ADJUST_GLOBAL_PTR(drive_g));
+    CDEmu.emulated_drive_gf = dop.drive_g;
 
     u16 boot_segment = *(u16*)&buffer[0x22];
     if (!boot_segment)
         boot_segment = 0x07C0;
-    SET_EBDA2(ebda_seg, cdemu.load_segment, boot_segment);
-    SET_EBDA2(ebda_seg, cdemu.buffer_segment, 0x0000);
+    CDEmu.load_segment = boot_segment;
+    CDEmu.buffer_segment = 0x0000;
 
     u16 nbsectors = *(u16*)&buffer[0x26];
-    SET_EBDA2(ebda_seg, cdemu.sector_count, nbsectors);
+    CDEmu.sector_count = nbsectors;
 
     lba = *(u32*)&buffer[0x28];
-    SET_EBDA2(ebda_seg, cdemu.ilba, lba);
+    CDEmu.ilba = lba;
 
     // And we read the image in memory
     dop.lba = lba;
     dop.count = DIV_ROUND_UP(nbsectors, 4);
     dop.buf_fl = MAKE_FLATPTR(boot_segment, 0);
-    ret = cdrom_read(&dop);
+    ret = cdb_read(&dop);
     if (ret)
         return 12;
 
     if (media == 0) {
         // No emulation requested - return success.
-        SET_EBDA2(ebda_seg, cdemu.emulated_extdrive, EXTSTART_CD + cdid);
+        CDEmu.emulated_extdrive = EXTSTART_CD + cdid;
         return 0;
     }
 
     // Emulation of a floppy/harddisk requested
-    if (! CONFIG_CDROM_EMU || !cdemu_drive)
+    if (! CONFIG_CDROM_EMU || !cdemu_drive_gf)
         return 13;
 
     // Set emulated drive id and increase bios installed hardware
     // number of devices
     if (media < 4) {
         // Floppy emulation
-        SET_EBDA2(ebda_seg, cdemu.emulated_extdrive, 0x00);
-        SETBITS_BDA(equipment_list_flags, 0x41);
+        CDEmu.emulated_extdrive = 0x00;
+        // XXX - get and set actual floppy count.
+        set_equipment_flags(0x41, 0x41);
 
         switch (media) {
         case 0x01:  // 1.2M floppy
-            SET_EBDA2(ebda_seg, cdemu.lchs.spt, 15);
-            SET_EBDA2(ebda_seg, cdemu.lchs.cylinders, 80);
-            SET_EBDA2(ebda_seg, cdemu.lchs.heads, 2);
+            CDEmu.lchs.spt = 15;
+            CDEmu.lchs.cylinders = 80;
+            CDEmu.lchs.heads = 2;
             break;
         case 0x02:  // 1.44M floppy
-            SET_EBDA2(ebda_seg, cdemu.lchs.spt, 18);
-            SET_EBDA2(ebda_seg, cdemu.lchs.cylinders, 80);
-            SET_EBDA2(ebda_seg, cdemu.lchs.heads, 2);
+            CDEmu.lchs.spt = 18;
+            CDEmu.lchs.cylinders = 80;
+            CDEmu.lchs.heads = 2;
             break;
         case 0x03:  // 2.88M floppy
-            SET_EBDA2(ebda_seg, cdemu.lchs.spt, 36);
-            SET_EBDA2(ebda_seg, cdemu.lchs.cylinders, 80);
-            SET_EBDA2(ebda_seg, cdemu.lchs.heads, 2);
+            CDEmu.lchs.spt = 36;
+            CDEmu.lchs.cylinders = 80;
+            CDEmu.lchs.heads = 2;
             break;
         }
     } else {
         // Harddrive emulation
-        SET_EBDA2(ebda_seg, cdemu.emulated_extdrive, 0x80);
+        CDEmu.emulated_extdrive = 0x80;
         SET_BDA(hdcount, GET_BDA(hdcount) + 1);
 
         // Peak at partition table to get chs.
@@ -392,14 +310,13 @@ cdrom_boot(int cdid)
         u8 cyllow = GET_FARVAR(boot_segment, mbr->partitions[0].last.cyllow);
         u8 heads = GET_FARVAR(boot_segment, mbr->partitions[0].last.heads);
 
-        SET_EBDA2(ebda_seg, cdemu.lchs.spt, sptcyl & 0x3f);
-        SET_EBDA2(ebda_seg, cdemu.lchs.cylinders
-                  , ((sptcyl<<2)&0x300) + cyllow + 1);
-        SET_EBDA2(ebda_seg, cdemu.lchs.heads, heads + 1);
+        CDEmu.lchs.spt = sptcyl & 0x3f;
+        CDEmu.lchs.cylinders = ((sptcyl<<2)&0x300) + cyllow + 1;
+        CDEmu.lchs.heads = heads + 1;
     }
 
     // everything is ok, so from now on, the emulation is active
-    SET_EBDA2(ebda_seg, cdemu.active, 0x01);
+    CDEmu.active = 0x01;
     dprintf(6, "cdemu media=%d\n", media);
 
     return 0;

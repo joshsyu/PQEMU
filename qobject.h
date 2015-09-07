@@ -8,8 +8,8 @@
  * Authors:
  *  Luiz Capitulino <lcapitulino@redhat.com>
  *
- * This work is licensed under the terms of the GNU GPL, version 2.  See
- * the COPYING file in the top-level directory.
+ * This work is licensed under the terms of the GNU LGPL, version 2.1 or later.
+ * See the COPYING.LIB file in the top-level directory.
  *
  * QObject Reference Counts Terminology
  * ------------------------------------
@@ -71,7 +71,7 @@ typedef struct QObject {
 
 /* High-level interface for qobject_decref() */
 #define QDECREF(obj)              \
-    qobject_decref(QOBJECT(obj))
+    qobject_decref(obj ? QOBJECT(obj) : NULL)
 
 /* Initialize an object to default values */
 #define QOBJECT_INIT(obj, qtype_type)   \

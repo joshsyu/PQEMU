@@ -15,7 +15,7 @@
 #define _QEMU_VIRTIO_BLK_H
 
 #include "virtio.h"
-#include "block.h"
+#include "hw/block-common.h"
 
 /* from Linux's linux/virtio_blk.h */
 
@@ -30,12 +30,12 @@
 #define VIRTIO_BLK_F_RO         5       /* Disk is read-only */
 #define VIRTIO_BLK_F_BLK_SIZE   6       /* Block size of disk is available*/
 #define VIRTIO_BLK_F_SCSI       7       /* Supports scsi command passthru */
-#define VIRTIO_BLK_F_IDENTIFY   8       /* ATA IDENTIFY supported */
-#define VIRTIO_BLK_F_WCACHE     9       /* write cache enabled */
+/* #define VIRTIO_BLK_F_IDENTIFY   8       ATA IDENTIFY supported, DEPRECATED */
+#define VIRTIO_BLK_F_WCE        9       /* write cache enabled */
+#define VIRTIO_BLK_F_TOPOLOGY   10      /* Topology information is available */
+#define VIRTIO_BLK_F_CONFIG_WCE 11      /* write cache configurable */
 
-#define VIRTIO_BLK_ID_LEN       256     /* length of identify u16 array */
-#define VIRTIO_BLK_ID_SN        10      /* start of char * serial# */
-#define VIRTIO_BLK_ID_SN_BYTES  20      /* length in bytes of serial# */
+#define VIRTIO_BLK_ID_BYTES     20      /* ID string length */
 
 struct virtio_blk_config
 {
@@ -45,9 +45,13 @@ struct virtio_blk_config
     uint16_t cylinders;
     uint8_t heads;
     uint8_t sectors;
-    uint32_t _blk_size;    /* structure pad, currently unused */
-    uint16_t identify[VIRTIO_BLK_ID_LEN];
-} __attribute__((packed));
+    uint32_t blk_size;
+    uint8_t physical_block_exp;
+    uint8_t alignment_offset;
+    uint16_t min_io_size;
+    uint32_t opt_io_size;
+    uint8_t wce;
+} QEMU_PACKED;
 
 /* These two define direction. */
 #define VIRTIO_BLK_T_IN         0
@@ -58,6 +62,9 @@ struct virtio_blk_config
 
 /* Flush the volatile write cache */
 #define VIRTIO_BLK_T_FLUSH      4
+
+/* return the device ID string */
+#define VIRTIO_BLK_T_GET_ID     8
 
 /* Barrier before this op. */
 #define VIRTIO_BLK_T_BARRIER    0x80000000
@@ -91,5 +98,17 @@ struct virtio_scsi_inhdr
     uint32_t sense_len;
     uint32_t residual;
 };
+
+struct VirtIOBlkConf
+{
+    BlockConf conf;
+    char *serial;
+    uint32_t scsi;
+    uint32_t config_wce;
+};
+
+#define DEFINE_VIRTIO_BLK_FEATURES(_state, _field) \
+        DEFINE_VIRTIO_COMMON_FEATURES(_state, _field), \
+        DEFINE_PROP_BIT("config-wce", _state, _field, VIRTIO_BLK_F_CONFIG_WCE, true)
 
 #endif

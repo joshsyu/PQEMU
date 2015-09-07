@@ -2,78 +2,87 @@
 #ifndef __USB_H
 #define __USB_H
 
-// Local information for a usb controller.
+#include "util.h" // struct mutex_s
+
+// Information on a USB end point.
+struct usb_pipe {
+    union {
+        struct usb_s *cntl;
+        struct usb_pipe *freenext;
+    };
+    u8 type;
+    u8 ep;
+    u8 devaddr;
+    u8 speed;
+    u16 maxpacket;
+    u8 eptype;
+};
+
+// Common information for usb devices.
+struct usbdevice_s {
+    struct usbhub_s *hub;
+    struct usb_pipe *defpipe;
+    u32 port;
+    struct usb_config_descriptor *config;
+    struct usb_interface_descriptor *iface;
+    int imax;
+    u8 speed;
+    u8 devaddr;
+};
+
+// Common information for usb controllers.
 struct usb_s {
+    struct usb_pipe *freelist;
+    struct mutex_s resetlock;
+    struct pci_device *pci;
+    int busid;
     u8 type;
     u8 maxaddr;
-    u16 bdf;
+};
 
-    union {
-        struct {
-            u16 iobase;
-            void *qh;
-        } uhci;
-        struct {
-            struct ohci_regs *regs;
-            void *control_ed;
-        } ohci;
-    };
+// Information for enumerating USB hubs
+struct usbhub_s {
+    struct usbhub_op_s *op;
+    struct usbdevice_s *usbdev;
+    struct usb_s *cntl;
+    struct mutex_s lock;
+    u32 powerwait;
+    u32 port;
+    u32 threads;
+    u32 portcount;
+    u32 devcount;
+};
+
+// Hub callback (32bit) info
+struct usbhub_op_s {
+    int (*detect)(struct usbhub_s *hub, u32 port);
+    int (*reset)(struct usbhub_s *hub, u32 port);
+    void (*disconnect)(struct usbhub_s *hub, u32 port);
 };
 
 #define USB_TYPE_UHCI 1
 #define USB_TYPE_OHCI 2
+#define USB_TYPE_EHCI 3
 
-extern struct usb_s USBControllers[];
-
-struct usb_pipe {
-    u32 endp;
-};
+#define USB_FULLSPEED 0
+#define USB_LOWSPEED  1
+#define USB_HIGHSPEED 2
 
 #define USB_MAXADDR 127
-
-// usb.c
-void usb_setup();
-int configure_usb_device(struct usb_s *cntl, int lowspeed);
-struct usb_ctrlrequest;
-int send_default_control(u32 endp, const struct usb_ctrlrequest *req
-                         , void *data);
-struct usb_pipe *alloc_intr_pipe(u32 endp, int period);
-int usb_poll_intr(struct usb_pipe *pipe, void *data);
-
-
-/****************************************************************
- * endpoint definition
- ****************************************************************/
-
-static inline u32
-mkendp(struct usb_s *cntl, u8 devaddr, u8 ep, u8 lowspeed, u8 maxsize)
-{
-    u8 bus = cntl-USBControllers;
-    u8 size = __ffs(maxsize);
-    return (size<<25) | (lowspeed<<24) | (bus<<16) | (devaddr<<8) | ep;
-}
-
-static inline u8 endp2ep(u32 endp) {
-    return endp;
-}
-static inline u8 endp2devaddr(u32 endp) {
-    return endp>>8;
-}
-static inline struct usb_s *endp2cntl(u32 endp) {
-    u8 bus = endp>>16;
-    return &USBControllers[bus];
-}
-static inline u8 endp2speed(u32 endp) {
-    return (endp>>24) & 1;
-}
-static inline u8 endp2maxsize(u32 endp) {
-    return 1 << (endp>>25);
-}
 
 
 /****************************************************************
  * usb structs and flags
  ****************************************************************/
+
+// USB mandated timings (in ms)
+#define USB_TIME_SIGATT 100
+#define USB_TIME_ATTDB  100
+#define USB_TIME_DRST   10
+#define USB_TIME_DRSTR  50
+#define USB_TIME_RSTRCY 10
+
+#define USB_TIME_SETADDR_RECOVERY 2
 
 #define USB_PID_OUT                     0xe1
 #define USB_PID_IN                      0x69
@@ -194,5 +203,39 @@ struct usb_endpoint_descriptor {
 #define USB_ENDPOINT_XFER_BULK          2
 #define USB_ENDPOINT_XFER_INT           3
 #define USB_ENDPOINT_MAX_ADJUSTABLE     0x80
+
+
+/****************************************************************
+ * usb mass storage flags
+ ****************************************************************/
+
+#define US_SC_ATAPI_8020   0x02
+#define US_SC_ATAPI_8070   0x05
+#define US_SC_SCSI         0x06
+
+#define US_PR_BULK         0x50  /* bulk-only transport */
+#define US_PR_UAS          0x62  /* usb attached scsi   */
+
+/****************************************************************
+ * function defs
+ ****************************************************************/
+
+// usb.c
+struct usb_pipe *usb_alloc_pipe(struct usbdevice_s *usbdev
+                                , struct usb_endpoint_descriptor *epdesc);
+int usb_send_bulk(struct usb_pipe *pipe, int dir, void *data, int datasize);
+int usb_poll_intr(struct usb_pipe *pipe, void *data);
+int send_default_control(struct usb_pipe *pipe, const struct usb_ctrlrequest *req
+                         , void *data);
+void free_pipe(struct usb_pipe *pipe);
+struct usb_pipe *usb_getFreePipe(struct usb_s *cntl, u8 eptype);
+void usb_desc2pipe(struct usb_pipe *pipe, struct usbdevice_s *usbdev
+                   , struct usb_endpoint_descriptor *epdesc);
+int usb_getFrameExp(struct usbdevice_s *usbdev
+                    , struct usb_endpoint_descriptor *epdesc);
+struct usb_endpoint_descriptor *findEndPointDesc(struct usbdevice_s *usbdev
+                                                 , int type, int dir);
+void usb_enumerate(struct usbhub_s *hub);
+void usb_setup(void);
 
 #endif // usb.h

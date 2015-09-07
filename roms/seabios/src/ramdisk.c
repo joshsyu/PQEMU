@@ -9,25 +9,21 @@
 #include "memmap.h" // add_e820
 #include "biosvar.h" // GET_GLOBAL
 #include "bregs.h" // struct bregs
+#include "boot.h" // boot_add_floppy
 
 void
-describe_ramdisk(struct drive_s *drive_g)
+ramdisk_setup(void)
 {
-    printf("%s", drive_g->model);
-}
-
-void
-ramdisk_setup()
-{
-    if (!CONFIG_COREBOOT_FLASH || !CONFIG_FLASH_FLOPPY)
+    if (!CONFIG_FLASH_FLOPPY)
         return;
 
     // Find image.
-    struct cbfs_file *file = cbfs_findprefix("floppyimg/", NULL);
+    struct romfile_s *file = romfile_findprefix("floppyimg/", NULL);
     if (!file)
         return;
-    u32 size = cbfs_datasize(file);
-    dprintf(3, "Found floppy file %s of size %d\n", cbfs_filename(file), size);
+    const char *filename = file->name;
+    u32 size = file->size;
+    dprintf(3, "Found floppy file %s of size %d\n", filename, size);
     int ftype = find_floppy_type(size);
     if (ftype < 0) {
         dprintf(3, "No floppy type found for ramdisk size\n");
@@ -37,19 +33,24 @@ ramdisk_setup()
     // Allocate ram for image.
     void *pos = memalign_tmphigh(PAGE_SIZE, size);
     if (!pos) {
-        dprintf(3, "Not enough memory for ramdisk\n");
+        warn_noalloc();
         return;
     }
     add_e820((u32)pos, size, E820_RESERVED);
 
     // Copy image into ram.
-    cbfs_copyfile(file, pos, size);
+    int ret = file->copy(file, pos, size);
+    if (ret < 0)
+        return;
 
     // Setup driver.
-    dprintf(1, "Mapping CBFS floppy %s to addr %p\n", cbfs_filename(file), pos);
-    struct drive_s *drive_g = addFloppy((u32)pos, ftype, DTYPE_RAMDISK);
-    if (drive_g)
-        strtcpy(drive_g->model, cbfs_filename(file), ARRAY_SIZE(drive_g->model));
+    struct drive_s *drive_g = init_floppy((u32)pos, ftype);
+    if (!drive_g)
+        return;
+    drive_g->type = DTYPE_RAMDISK;
+    dprintf(1, "Mapping CBFS floppy %s to addr %p\n", filename, pos);
+    char *desc = znprintf(MAXDESCSIZE, "Ramdisk [%s]", &filename[10]);
+    boot_add_floppy(drive_g, desc, bootprio_find_named_rom(filename, 0));
 }
 
 static int
@@ -87,7 +88,7 @@ ramdisk_copy(struct disk_op_s *op, int iswrite)
 int
 process_ramdisk_op(struct disk_op_s *op)
 {
-    if (!CONFIG_COREBOOT_FLASH || !CONFIG_FLASH_FLOPPY)
+    if (!CONFIG_COREBOOT || !CONFIG_COREBOOT_FLASH || !CONFIG_FLASH_FLOPPY)
         return 0;
 
     switch (op->command) {

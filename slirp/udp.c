@@ -41,7 +41,7 @@
 #include <slirp.h>
 #include "ip_icmp.h"
 
-static u_int8_t udp_tos(struct socket *so);
+static uint8_t udp_tos(struct socket *so);
 
 void
 udp_init(Slirp *slirp)
@@ -49,6 +49,14 @@ udp_init(Slirp *slirp)
     slirp->udb.so_next = slirp->udb.so_prev = &slirp->udb;
     slirp->udp_last_so = &slirp->udb;
 }
+
+void udp_cleanup(Slirp *slirp)
+{
+    while (slirp->udb.so_next != &slirp->udb) {
+        udp_detach(slirp->udb.so_next);
+    }
+}
+
 /* m->m_data  points at ip packet header
  * m->m_len   length ip packet
  * ip->ip_len length data (IPDU)
@@ -88,7 +96,7 @@ udp_input(register struct mbuf *m, int iphlen)
 	 * Make mbuf data length reflect UDP length.
 	 * If not enough data to reflect UDP length, drop.
 	 */
-	len = ntohs((u_int16_t)uh->uh_ulen);
+	len = ntohs((uint16_t)uh->uh_ulen);
 
 	if (ip->ip_len != len) {
 		if (len > ip->ip_len) {
@@ -120,20 +128,23 @@ udp_input(register struct mbuf *m, int iphlen)
         /*
          *  handle DHCP/BOOTP
          */
-        if (ntohs(uh->uh_dport) == BOOTP_SERVER) {
-            bootp_input(m);
-            goto bad;
-        }
-
-        if (slirp->restricted) {
-            goto bad;
-        }
+        if (ntohs(uh->uh_dport) == BOOTP_SERVER &&
+            (ip->ip_dst.s_addr == slirp->vhost_addr.s_addr ||
+             ip->ip_dst.s_addr == 0xffffffff)) {
+                bootp_input(m);
+                goto bad;
+            }
 
         /*
          *  handle TFTP
          */
-        if (ntohs(uh->uh_dport) == TFTP_SERVER) {
+        if (ntohs(uh->uh_dport) == TFTP_SERVER &&
+            ip->ip_dst.s_addr == slirp->vhost_addr.s_addr) {
             tftp_input(m);
+            goto bad;
+        }
+
+        if (slirp->restricted) {
             goto bad;
         }
 
@@ -219,8 +230,7 @@ udp_input(register struct mbuf *m, int iphlen)
 
 	return;
 bad:
-	m_freem(m);
-	return;
+	m_free(m);
 }
 
 int udp_output2(struct socket *so, struct mbuf *m,
@@ -321,7 +331,7 @@ static const struct tos_t udptos[] = {
 	{0, 0, 0, 0}
 };
 
-static u_int8_t
+static uint8_t
 udp_tos(struct socket *so)
 {
 	int i = 0;
@@ -339,7 +349,7 @@ udp_tos(struct socket *so)
 }
 
 struct socket *
-udp_listen(Slirp *slirp, u_int32_t haddr, u_int hport, u_int32_t laddr,
+udp_listen(Slirp *slirp, uint32_t haddr, u_int hport, uint32_t laddr,
            u_int lport, int flags)
 {
 	struct sockaddr_in addr;

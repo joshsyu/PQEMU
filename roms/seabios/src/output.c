@@ -21,22 +21,23 @@ struct putcinfo {
  * Debug output
  ****************************************************************/
 
-#define DEBUG_PORT PORT_SERIAL1
 #define DEBUG_TIMEOUT 100000
 
+u16 DebugOutputPort VAR16VISIBLE = 0x402;
+
 void
-debug_serial_setup()
+debug_serial_setup(void)
 {
     if (!CONFIG_DEBUG_SERIAL)
         return;
     // setup for serial logging: 8N1
     u8 oldparam, newparam = 0x03;
-    oldparam = inb(DEBUG_PORT+SEROFF_LCR);
-    outb(newparam, DEBUG_PORT+SEROFF_LCR);
+    oldparam = inb(CONFIG_DEBUG_SERIAL_PORT+SEROFF_LCR);
+    outb(newparam, CONFIG_DEBUG_SERIAL_PORT+SEROFF_LCR);
     // Disable irqs
     u8 oldier, newier = 0;
-    oldier = inb(DEBUG_PORT+SEROFF_IER);
-    outb(newier, DEBUG_PORT+SEROFF_IER);
+    oldier = inb(CONFIG_DEBUG_SERIAL_PORT+SEROFF_IER);
+    outb(newier, CONFIG_DEBUG_SERIAL_PORT+SEROFF_IER);
 
     if (oldparam != newparam || oldier != newier)
         dprintf(1, "Changing serial settings was %x/%x now %x/%x\n"
@@ -50,21 +51,21 @@ debug_serial(char c)
     if (!CONFIG_DEBUG_SERIAL)
         return;
     int timeout = DEBUG_TIMEOUT;
-    while ((inb(DEBUG_PORT+SEROFF_LSR) & 0x60) != 0x60)
+    while ((inb(CONFIG_DEBUG_SERIAL_PORT+SEROFF_LSR) & 0x20) != 0x20)
         if (!timeout--)
             // Ran out of time.
             return;
-    outb(c, DEBUG_PORT+SEROFF_DATA);
+    outb(c, CONFIG_DEBUG_SERIAL_PORT+SEROFF_DATA);
 }
 
 // Make sure all serial port writes have been completely sent.
 static void
-debug_serial_flush()
+debug_serial_flush(void)
 {
     if (!CONFIG_DEBUG_SERIAL)
         return;
     int timeout = DEBUG_TIMEOUT;
-    while ((inb(DEBUG_PORT+SEROFF_LSR) & 0x40) != 0x40)
+    while ((inb(CONFIG_DEBUG_SERIAL_PORT+SEROFF_LSR) & 0x60) != 0x60)
         if (!timeout--)
             // Ran out of time.
             return;
@@ -76,19 +77,21 @@ putc_debug(struct putcinfo *action, char c)
 {
     if (! CONFIG_DEBUG_LEVEL)
         return;
-    if (! CONFIG_COREBOOT)
+    if (CONFIG_DEBUG_IO)
         // Send character to debug port.
-        outb(c, PORT_BIOS_DEBUG);
+        outb(c, GET_GLOBAL(DebugOutputPort));
     if (c == '\n')
         debug_serial('\r');
     debug_serial(c);
 }
 
-// In 16bit mode just need a dummy variable (putc_debug is always used
-// anyway), and in 32bit mode need a pointer to the 32bit instance of
-// putc_debug().
+// In segmented mode just need a dummy variable (putc_debug is always
+// used anyway), and in 32bit flat mode need a pointer to the 32bit
+// instance of putc_debug().
 #if MODE16
 static struct putcinfo debuginfo VAR16;
+#elif MODESEGMENT
+static struct putcinfo debuginfo VAR32SEG;
 #else
 static struct putcinfo debuginfo = { putc_debug };
 #endif
@@ -114,7 +117,7 @@ screenc(char c)
 static void
 putc_screen(struct putcinfo *action, char c)
 {
-    if (CONFIG_SCREEN_AND_DEBUG)
+    if (ScreenAndDebug)
         putc_debug(&debuginfo, c);
     if (c == '\n')
         screenc('\r');
@@ -132,8 +135,8 @@ static struct putcinfo screeninfo = { putc_screen };
 static void
 putc(struct putcinfo *action, char c)
 {
-    if (MODE16) {
-        // Only debugging output supported in 16bit mode.
+    if (MODESEGMENT) {
+        // Only debugging output supported in segmented mode.
         putc_debug(action, c);
         return;
     }
@@ -146,6 +149,8 @@ putc(struct putcinfo *action, char c)
 static void
 puts(struct putcinfo *action, const char *s)
 {
+    if (!MODESEGMENT && !s)
+        s = "(NULL)";
     for (; *s; s++)
         putc(action, *s);
 }
@@ -191,25 +196,10 @@ putsinglehex(struct putcinfo *action, u32 val)
     putc(action, val);
 }
 
-// Output an integer in hexadecimal.
+// Output an integer in hexadecimal with a specified width.
 static void
 puthex(struct putcinfo *action, u32 val, int width)
 {
-    if (!width) {
-        u32 tmp = val;
-        width = 1;
-        if (tmp > 0xffff) {
-            width += 4;
-            tmp >>= 16;
-        }
-        if (tmp > 0xff) {
-            width += 2;
-            tmp >>= 8;
-        }
-        if (tmp > 0xf)
-            width += 1;
-    }
-
     switch (width) {
     default: putsinglehex(action, (val >> 28) & 0xf);
     case 7:  putsinglehex(action, (val >> 24) & 0xf);
@@ -220,6 +210,20 @@ puthex(struct putcinfo *action, u32 val, int width)
     case 2:  putsinglehex(action, (val >> 4) & 0xf);
     case 1:  putsinglehex(action, (val >> 0) & 0xf);
     }
+}
+
+// Output an integer in hexadecimal with a minimum width.
+static void
+putprettyhex(struct putcinfo *action, u32 val, int width, char padchar)
+{
+    u32 tmp = val;
+    int count = 1;
+    while (tmp >>= 4)
+        count++;
+    width -= count;
+    while (width-- > 0)
+        putc(action, padchar);
+    puthex(action, val, count);
 }
 
 static inline int
@@ -242,15 +246,25 @@ bvprintf(struct putcinfo *action, const char *fmt, va_list args)
         }
         const char *n = s+1;
         int field_width = 0;
+        char padchar = ' ';
+        u8 is64 = 0;
         for (;;) {
             c = GET_GLOBAL(*(u8*)n);
             if (!isdigit(c))
                 break;
-            field_width = field_width * 10 + c - '0';
+            if (!field_width && (c == '0'))
+                padchar = '0';
+            else
+                field_width = field_width * 10 + c - '0';
             n++;
         }
         if (c == 'l') {
             // Ignore long format indicator
+            n++;
+            c = GET_GLOBAL(*(u8*)n);
+        }
+        if (c == 'l') {
+            is64 = 1;
             n++;
             c = GET_GLOBAL(*(u8*)n);
         }
@@ -262,6 +276,8 @@ bvprintf(struct putcinfo *action, const char *fmt, va_list args)
             break;
         case 'd':
             val = va_arg(args, s32);
+            if (is64)
+                va_arg(args, s32);
             if (val < 0) {
                 putc(action, '-');
                 val = -val;
@@ -270,16 +286,27 @@ bvprintf(struct putcinfo *action, const char *fmt, va_list args)
             break;
         case 'u':
             val = va_arg(args, s32);
+            if (is64)
+                va_arg(args, s32);
             putuint(action, val);
             break;
         case 'p':
-            /* %p always has 0x prepended */
+            val = va_arg(args, s32);
             putc(action, '0');
             putc(action, 'x');
-            field_width = 8;
+            puthex(action, val, 8);
+            break;
         case 'x':
             val = va_arg(args, s32);
-            puthex(action, val, field_width);
+            if (is64) {
+                u32 upper = va_arg(args, s32);
+                if (upper) {
+                    putprettyhex(action, upper, field_width - 8, padchar);
+                    puthex(action, val, 8);
+                    break;
+                }
+            }
+            putprettyhex(action, val, field_width, padchar);
             break;
         case 'c':
             val = va_arg(args, int);
@@ -325,7 +352,7 @@ panic(const char *fmt, ...)
 void
 __dprintf(const char *fmt, ...)
 {
-    if (!MODE16 && CONFIG_THREADS && CONFIG_DEBUG_LEVEL >= DEBUG_thread
+    if (!MODESEGMENT && CONFIG_THREADS && CONFIG_DEBUG_LEVEL >= DEBUG_thread
         && *fmt != '\\' && *fmt != '/') {
         struct thread_info *cur = getCurThread();
         if (cur != &MainThread) {
@@ -347,12 +374,12 @@ __dprintf(const char *fmt, ...)
 void
 printf(const char *fmt, ...)
 {
-    ASSERT32();
+    ASSERT32FLAT();
     va_list args;
     va_start(args, fmt);
     bvprintf(&screeninfo, fmt, args);
     va_end(args);
-    if (CONFIG_SCREEN_AND_DEBUG)
+    if (ScreenAndDebug)
         debug_serial_flush();
 }
 
@@ -382,7 +409,7 @@ putc_str(struct putcinfo *info, char c)
 int
 snprintf(char *str, size_t size, const char *fmt, ...)
 {
-    ASSERT32();
+    ASSERT32FLAT();
     if (!size)
         return 0;
     struct snprintfinfo sinfo = { { putc_str }, str, str + size };
@@ -395,6 +422,30 @@ snprintf(char *str, size_t size, const char *fmt, ...)
         end = sinfo.end - 1;
     *end = '\0';
     return end - str;
+}
+
+// Build a formatted string - malloc'ing the memory.
+char *
+znprintf(size_t size, const char *fmt, ...)
+{
+    ASSERT32FLAT();
+    if (!size)
+        return NULL;
+    char *str = malloc_tmp(size);
+    if (!str) {
+        warn_noalloc();
+        return NULL;
+    }
+    struct snprintfinfo sinfo = { { putc_str }, str, str + size };
+    va_list args;
+    va_start(args, fmt);
+    bvprintf(&sinfo.info, fmt, args);
+    va_end(args);
+    char *end = sinfo.str;
+    if (end >= sinfo.end)
+        end = sinfo.end - 1;
+    *end = '\0';
+    return str;
 }
 
 
@@ -481,6 +532,29 @@ __warn_unimplemented(struct bregs *regs, int lineno, const char *fname)
         dprintf(1, "unimplemented %s:%d:\n", fname, lineno);
         dump_regs(regs);
     }
+}
+
+// Report a detected internal inconsistency.
+void
+__warn_internalerror(int lineno, const char *fname)
+{
+    dprintf(1, "WARNING - internal error detected at %s:%d!\n"
+            , fname, lineno);
+}
+
+// Report on an allocation failure.
+void
+__warn_noalloc(int lineno, const char *fname)
+{
+    dprintf(1, "WARNING - Unable to allocate resource at %s:%d!\n"
+            , fname, lineno);
+}
+
+// Report on a timeout exceeded.
+void
+__warn_timeout(int lineno, const char *fname)
+{
+    dprintf(1, "WARNING - Timeout at %s:%d!\n", fname, lineno);
 }
 
 // Report a handler reporting an invalid parameter to the caller.

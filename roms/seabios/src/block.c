@@ -10,38 +10,49 @@
 #include "cmos.h" // inb_cmos
 #include "util.h" // dprintf
 #include "ata.h" // process_ata_op
+#include "ahci.h" // process_ahci_op
+#include "virtio-blk.h" // process_virtio_blk_op
+#include "blockcmd.h" // cdb_*
 
-struct drives_s Drives VAR16VISIBLE;
+u8 FloppyCount VAR16VISIBLE;
+u8 CDCount;
+struct drive_s *IDMap[3][CONFIG_MAX_EXTDRIVE] VAR16VISIBLE;
+u8 *bounce_buf_fl VAR16VISIBLE;
+struct dpte_s DefaultDPTE VARLOW;
 
 struct drive_s *
 getDrive(u8 exttype, u8 extdriveoffset)
 {
-    // basic check : device has to be defined
-    if (extdriveoffset >= ARRAY_SIZE(Drives.idmap[0]))
+    if (extdriveoffset >= ARRAY_SIZE(IDMap[0]))
         return NULL;
-
-    // Get the ata channel
-    u8 driveid = GET_GLOBAL(Drives.idmap[exttype][extdriveoffset]);
-
-    // basic check : device has to be valid
-    if (driveid >= ARRAY_SIZE(Drives.drives))
+    struct drive_s *drive_gf = GET_GLOBAL(IDMap[exttype][extdriveoffset]);
+    if (!drive_gf)
         return NULL;
-
-    return &Drives.drives[driveid];
+    return GLOBALFLAT2GLOBAL(drive_gf);
 }
 
-struct drive_s *
-allocDrive()
+int getDriveId(u8 exttype, struct drive_s *drive_g)
 {
-    int driveid = Drives.drivecount;
-    if (driveid >= ARRAY_SIZE(Drives.drives))
-        return NULL;
-    Drives.drivecount++;
-    struct drive_s *drive_g = &Drives.drives[driveid];
-    memset(drive_g, 0, sizeof(*drive_g));
-    return drive_g;
+    int i;
+    for (i = 0; i < ARRAY_SIZE(IDMap[0]); i++)
+        if (getDrive(exttype, i) == drive_g)
+            return i;
+    return -1;
 }
 
+int bounce_buf_init(void)
+{
+    if (bounce_buf_fl)
+        return 0;
+
+    u8 *buf = malloc_low(CDROM_SECTOR_SIZE);
+    if (!buf) {
+        warn_noalloc();
+        return -1;
+    }
+    bounce_buf_fl = buf;
+    return 0;
+}
 
 /****************************************************************
  * Disk geometry translation
@@ -61,10 +72,15 @@ get_translation(struct drive_s *drive_g)
         return translation;
     }
 
-    // On COREBOOT, use a heuristic to determine translation type.
+    // Otherwise use a heuristic to determine translation type.
     u16 heads = GET_GLOBAL(drive_g->pchs.heads);
     u16 cylinders = GET_GLOBAL(drive_g->pchs.cylinders);
     u16 spt = GET_GLOBAL(drive_g->pchs.spt);
+    u64 sectors = GET_GLOBAL(drive_g->sectors);
+    u64 psectors = (u64)heads * cylinders * spt;
+    if (!heads || !cylinders || !spt || psectors > sectors)
+        // pchs doesn't look valid - use LBA.
+        return TRANSLATION_LBA;
 
     if (cylinders <= 1024 && heads <= 16 && spt <= 63)
         return TRANSLATION_NONE;
@@ -73,15 +89,12 @@ get_translation(struct drive_s *drive_g)
     return TRANSLATION_LBA;
 }
 
-void
+static void
 setup_translation(struct drive_s *drive_g)
 {
     u8 translation = get_translation(drive_g);
     SET_GLOBAL(drive_g->translation, translation);
 
-    u8 ataid = GET_GLOBAL(drive_g->cntl_id);
-    u8 channel = ataid / 2;
-    u8 slave = ataid % 2;
     u16 heads = GET_GLOBAL(drive_g->pchs.heads);
     u16 cylinders = GET_GLOBAL(drive_g->pchs.cylinders);
     u16 spt = GET_GLOBAL(drive_g->pchs.spt);
@@ -141,11 +154,12 @@ setup_translation(struct drive_s *drive_g)
     // clip to 1024 cylinders in lchs
     if (cylinders > 1024)
         cylinders = 1024;
-    dprintf(1, "ata%d-%d: PCHS=%u/%d/%d translation=%s LCHS=%d/%d/%d\n"
-            , channel, slave
+    dprintf(1, "drive %p: PCHS=%u/%d/%d translation=%s LCHS=%d/%d/%d s=%d\n"
+            , drive_g
             , drive_g->pchs.cylinders, drive_g->pchs.heads, drive_g->pchs.spt
             , desc
-            , cylinders, heads, spt);
+            , cylinders, heads, spt
+            , (u32)sectors);
 
     SET_GLOBAL(drive_g->lchs.heads, heads);
     SET_GLOBAL(drive_g->lchs.cylinders, cylinders);
@@ -180,20 +194,19 @@ fill_fdpt(struct drive_s *drive_g, int hdid)
     fdpt->heads = nlh;
     fdpt->sectors = nlspt;
 
-    if (nlc == npc && nlh == nph && nlspt == npspt)
-        // no logical CHS mapping used, just physical CHS
-        // use Standard Fixed Disk Parameter Table (FDPT)
-        return;
+    if (nlc != npc || nlh != nph || nlspt != npspt) {
+        // Logical mapping present - use extended structure.
 
-    // complies with Phoenix style Translated Fixed Disk Parameter
-    // Table (FDPT)
-    fdpt->phys_cylinders = npc;
-    fdpt->phys_heads = nph;
-    fdpt->phys_sectors = npspt;
-    fdpt->a0h_signature = 0xa0;
+        // complies with Phoenix style Translated Fixed Disk Parameter
+        // Table (FDPT)
+        fdpt->phys_cylinders = npc;
+        fdpt->phys_heads = nph;
+        fdpt->phys_sectors = npspt;
+        fdpt->a0h_signature = 0xa0;
 
-    // Checksum structure.
-    fdpt->checksum -= checksum(fdpt, sizeof(*fdpt));
+        // Checksum structure.
+        fdpt->checksum -= checksum(fdpt, sizeof(*fdpt));
+    }
 
     if (hdid == 0)
         SET_IVT(0x41, SEGOFF(get_ebda_seg(), offsetof(
@@ -203,51 +216,33 @@ fill_fdpt(struct drive_s *drive_g, int hdid)
                                  struct extended_bios_data_area_s, fdpt[1])));
 }
 
-// Map a drive (that was registered via add_bcv_hd)
+// Find spot to add a drive
+static void
+add_drive(struct drive_s **idmap, u8 *count, struct drive_s *drive_g)
+{
+    if (*count >= ARRAY_SIZE(IDMap[0])) {
+        warn_noalloc();
+        return;
+    }
+    idmap[*count] = drive_g;
+    *count = *count + 1;
+}
+
+// Map a hard drive
 void
 map_hd_drive(struct drive_s *drive_g)
 {
-    // fill hdidmap
-    u8 hdcount = GET_BDA(hdcount);
-    if (hdcount >= ARRAY_SIZE(Drives.idmap[0]))
-        return;
-    dprintf(3, "Mapping hd drive %p to %d\n", drive_g, hdcount);
-    int driveid = drive_g - Drives.drives;
-    SET_GLOBAL(Drives.idmap[EXTTYPE_HD][hdcount], driveid);
-    SET_BDA(hdcount, hdcount + 1);
+    ASSERT32FLAT();
+    struct bios_data_area_s *bda = MAKE_FLATPTR(SEG_BDA, 0);
+    int hdid = bda->hdcount;
+    dprintf(3, "Mapping hd drive %p to %d\n", drive_g, hdid);
+    add_drive(IDMap[EXTTYPE_HD], &bda->hdcount, drive_g);
+
+    // Setup disk geometry translation.
+    setup_translation(drive_g);
 
     // Fill "fdpt" structure.
-    fill_fdpt(drive_g, hdcount);
-}
-
-// Find spot to add a drive
-static void
-add_ordered_drive(u8 *idmap, u8 *count, struct drive_s *drive_g)
-{
-    if (*count >= ARRAY_SIZE(Drives.idmap[0])) {
-        dprintf(1, "No room to map drive %p\n", drive_g);
-        return;
-    }
-    u8 *pos = &idmap[*count];
-    *count = *count + 1;
-    if (CONFIG_THREADS) {
-        // Add to idmap with assured drive order.
-        u8 *end = pos;
-        for (;;) {
-            u8 *prev = pos - 1;
-            if (prev < idmap)
-                break;
-            struct drive_s *prevdrive = &Drives.drives[*prev];
-            if (prevdrive->type < drive_g->type
-                || (prevdrive->type == drive_g->type
-                    && prevdrive->cntl_id < drive_g->cntl_id))
-                break;
-            pos--;
-        }
-        if (pos != end)
-            memmove(pos+1, pos, (void*)end-(void*)pos);
-    }
-    *pos = drive_g - Drives.drives;
+    fill_fdpt(drive_g, hdid);
 }
 
 // Map a cd
@@ -255,52 +250,25 @@ void
 map_cd_drive(struct drive_s *drive_g)
 {
     dprintf(3, "Mapping cd drive %p\n", drive_g);
-    add_ordered_drive(Drives.idmap[EXTTYPE_CD], &Drives.cdcount, drive_g);
+    add_drive(IDMap[EXTTYPE_CD], &CDCount, drive_g);
 }
 
 // Map a floppy
 void
 map_floppy_drive(struct drive_s *drive_g)
 {
-    // fill idmap
     dprintf(3, "Mapping floppy drive %p\n", drive_g);
-    add_ordered_drive(Drives.idmap[EXTTYPE_FLOPPY], &Drives.floppycount
-                      , drive_g);
+    add_drive(IDMap[EXTTYPE_FLOPPY], &FloppyCount, drive_g);
 
     // Update equipment word bits for floppy
-    if (Drives.floppycount == 1) {
+    if (FloppyCount == 1) {
         // 1 drive, ready for boot
-        SETBITS_BDA(equipment_list_flags, 0x01);
+        set_equipment_flags(0x41, 0x01);
         SET_BDA(floppy_harddisk_info, 0x07);
-    } else if (Drives.floppycount >= 2) {
+    } else if (FloppyCount >= 2) {
         // 2 drives, ready for boot
-        SETBITS_BDA(equipment_list_flags, 0x41);
+        set_equipment_flags(0x41, 0x41);
         SET_BDA(floppy_harddisk_info, 0x77);
-    }
-}
-
-// Show a one line description (without trailing newline) of a drive.
-void
-describe_drive(struct drive_s *drive_g)
-{
-    ASSERT32();
-    u8 type = GET_GLOBAL(drive_g->type);
-    switch (type) {
-    case DTYPE_FLOPPY:
-        describe_floppy(drive_g);
-        break;
-    case DTYPE_ATA:
-        describe_ata(drive_g);
-        break;
-    case DTYPE_ATAPI:
-        describe_atapi(drive_g);
-        break;
-    case DTYPE_RAMDISK:
-        describe_ramdisk(drive_g);
-        break;
-    default:
-        printf("Unknown");
-        break;
     }
 }
 
@@ -309,29 +277,74 @@ describe_drive(struct drive_s *drive_g)
  * 16bit calling interface
  ****************************************************************/
 
-// Execute a disk_op request.
-int
-process_op(struct disk_op_s *op)
+static int
+process_scsi_op(struct disk_op_s *op)
 {
-    u8 type = GET_GLOBAL(op->drive_g->type);
-    switch (type) {
-    case DTYPE_FLOPPY:
-        return process_floppy_op(op);
-    case DTYPE_ATA:
-        return process_ata_op(op);
-    case DTYPE_ATAPI:
-        return process_atapi_op(op);
-    case DTYPE_RAMDISK:
-        return process_ramdisk_op(op);
-    case DTYPE_CDEMU:
-        return process_cdemu_op(op);
+    switch (op->command) {
+    case CMD_READ:
+        return cdb_read(op);
+    case CMD_WRITE:
+        return cdb_write(op);
+    case CMD_FORMAT:
+    case CMD_RESET:
+    case CMD_ISREADY:
+    case CMD_VERIFY:
+    case CMD_SEEK:
+        return DISK_RET_SUCCESS;
     default:
         op->count = 0;
         return DISK_RET_EPARAM;
     }
 }
 
-// Execute a "disk_op_s" request - this runs on a stack in the ebda.
+static int
+process_atapi_op(struct disk_op_s *op)
+{
+    switch (op->command) {
+    case CMD_WRITE:
+    case CMD_FORMAT:
+        return DISK_RET_EWRITEPROTECT;
+    default:
+        return process_scsi_op(op);
+    }
+}
+
+// Execute a disk_op request.
+int
+process_op(struct disk_op_s *op)
+{
+    ASSERT16();
+    u8 type = GET_GLOBAL(op->drive_g->type);
+    switch (type) {
+    case DTYPE_FLOPPY:
+        return process_floppy_op(op);
+    case DTYPE_ATA:
+        return process_ata_op(op);
+    case DTYPE_RAMDISK:
+        return process_ramdisk_op(op);
+    case DTYPE_CDEMU:
+        return process_cdemu_op(op);
+    case DTYPE_VIRTIO_BLK:
+        return process_virtio_blk_op(op);
+    case DTYPE_AHCI:
+        return process_ahci_op(op);
+    case DTYPE_ATA_ATAPI:
+    case DTYPE_AHCI_ATAPI:
+        return process_atapi_op(op);
+    case DTYPE_USB:
+    case DTYPE_UAS:
+    case DTYPE_VIRTIO_SCSI:
+    case DTYPE_LSI_SCSI:
+    case DTYPE_ESP_SCSI:
+    case DTYPE_MEGASAS:
+        return process_scsi_op(op);
+    default:
+        op->count = 0;
+        return DISK_RET_EPARAM;
+    }
+}
+
+// Execute a "disk_op_s" request - this runs on the extra stack.
 static int
 __send_disk_op(struct disk_op_s *op_far, u16 op_seg)
 {
@@ -352,25 +365,13 @@ __send_disk_op(struct disk_op_s *op_far, u16 op_seg)
     return status;
 }
 
-// Execute a "disk_op_s" request by jumping to a stack in the ebda.
+// Execute a "disk_op_s" request by jumping to the extra 16bit stack.
 int
 send_disk_op(struct disk_op_s *op)
 {
+    ASSERT16();
     if (! CONFIG_DRIVES)
         return -1;
-    ASSERT16();
 
-    return stack_hop((u32)op, GET_SEG(SS), 0, __send_disk_op);
-}
-
-
-/****************************************************************
- * Setup
- ****************************************************************/
-
-void
-drive_setup()
-{
-    memset(&Drives, 0, sizeof(Drives));
-    memset(&Drives.idmap, 0xff, sizeof(Drives.idmap));
+    return stack_hop((u32)op, GET_SEG(SS), __send_disk_op);
 }

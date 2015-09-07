@@ -1,6 +1,6 @@
 // Variable layouts of bios.
 //
-// Copyright (C) 2008,2009  Kevin O'Connor <kevin@koconnor.net>
+// Copyright (C) 2008-2010  Kevin O'Connor <kevin@koconnor.net>
 //
 // This file may be distributed under the terms of the GNU LGPLv3 license.
 #ifndef __BIOSVAR_H
@@ -8,8 +8,7 @@
 
 #include "types.h" // u8
 #include "farptr.h" // GET_FARVAR
-#include "config.h" // CONFIG_*
-#include "disk.h" // struct chs_s
+#include "config.h" // SEG_BDA
 
 
 /****************************************************************
@@ -24,6 +23,12 @@ struct rmode_IVT {
     GET_FARVAR(SEG_IVT, ((struct rmode_IVT *)0)->ivec[vector])
 #define SET_IVT(vector, segoff)                                         \
     SET_FARVAR(SEG_IVT, ((struct rmode_IVT *)0)->ivec[vector], segoff)
+
+#define FUNC16(func) ({                                 \
+        ASSERT32FLAT();                                 \
+        extern void func (void);                        \
+        SEGOFF(SEG_BIOS, (u32)func - BUILD_BIOS_ADDR);  \
+    })
 
 
 /****************************************************************
@@ -106,8 +111,12 @@ struct bios_data_area_s {
     struct segoff_s video_savetable;
     u8 other_ac[4];
     // 40:B0
-    u8 other_b0[10];
+    u8 other_b0[9];
+    u8 vbe_flag;
     u16 vbe_mode;
+    u8 other_bc[4];
+    // 40:C0
+    u8 other_c0[4*16];
 } PACKED;
 
 // BDA floppy_recalibration_status bitdefs
@@ -128,50 +137,17 @@ struct bios_data_area_s {
     GET_FARVAR(SEG_BDA, ((struct bios_data_area_s *)0)->var)
 #define SET_BDA(var, val) \
     SET_FARVAR(SEG_BDA, ((struct bios_data_area_s *)0)->var, (val))
-#define CLEARBITS_BDA(var, val) do {                                    \
-        typeof(((struct bios_data_area_s *)0)->var) __val = GET_BDA(var); \
-        SET_BDA(var, (__val & ~(val)));                                 \
-    } while (0)
-#define SETBITS_BDA(var, val) do {                                      \
-        typeof(((struct bios_data_area_s *)0)->var) __val = GET_BDA(var); \
-        SET_BDA(var, (__val | (val)));                                  \
-    } while (0)
+
+// Helper function to set the bits of the equipment_list_flags variable.
+static inline void set_equipment_flags(u16 clear, u16 set) {
+    u16 eqf = GET_BDA(equipment_list_flags);
+    SET_BDA(equipment_list_flags, (eqf & ~clear) | set);
+}
 
 
 /****************************************************************
  * Extended Bios Data Area (EBDA)
  ****************************************************************/
-
-// DPTE definition
-struct dpte_s {
-    u16 iobase1;
-    u16 iobase2;
-    u8  prefix;
-    u8  unused;
-    u8  irq;
-    u8  blkcount;
-    u8  dma;
-    u8  pio;
-    u16 options;
-    u16 reserved;
-    u8  revision;
-    u8  checksum;
-};
-
-// ElTorito Device Emulation data
-struct cdemu_s {
-    struct drive_s *emulated_drive;
-    u32 ilba;
-    u16 buffer_segment;
-    u16 load_segment;
-    u16 sector_count;
-    u8  active;
-    u8  media;
-    u8  emulated_extdrive;
-
-    // Virtual device
-    struct chs_s lchs;
-};
 
 struct fdpt_s {
     u16 cylinders;
@@ -205,24 +181,6 @@ struct extended_bios_data_area_s {
     u8 other2[0xC4];
 
     // 0x121 - Begin custom storage.
-    u8 ps2ctr;
-    int RTCusers;
-
-    // El Torito Emulation data
-    struct cdemu_s cdemu;
-
-    // Buffer for disk DPTE table
-    struct dpte_s dpte;
-
-    // Locks for removable devices
-    u8 cdrom_locks[CONFIG_MAX_EXTDRIVE];
-
-    u16 boot_sequence;
-
-    // Stack space available for code that needs it.
-    u8 extra_stack[512] __aligned(8);
-
-    u8 cdemu_buf[2048 * !!CONFIG_CDROM_EMU];
 } PACKED;
 
 // The initial size and location of EBDA
@@ -232,49 +190,81 @@ struct extended_bios_data_area_s {
     FLATPTR_TO_SEG(BUILD_LOWRAM_END - EBDA_SIZE_START*1024)
 
 // Accessor functions
-static inline u16 get_ebda_seg() {
+static inline u16 get_ebda_seg(void) {
     return GET_BDA(ebda_seg);
 }
 static inline struct extended_bios_data_area_s *
-get_ebda_ptr()
+get_ebda_ptr(void)
 {
-    ASSERT32();
+    ASSERT32FLAT();
     return MAKE_FLATPTR(get_ebda_seg(), 0);
 }
-#define GET_EBDA2(eseg, var)                                            \
+#define GET_EBDA(eseg, var)                                             \
     GET_FARVAR(eseg, ((struct extended_bios_data_area_s *)0)->var)
-#define SET_EBDA2(eseg, var, val)                                       \
+#define SET_EBDA(eseg, var, val)                                        \
     SET_FARVAR(eseg, ((struct extended_bios_data_area_s *)0)->var, (val))
-#define GET_EBDA(var)                           \
-    GET_EBDA2(get_ebda_seg(), var)
-#define SET_EBDA(var, val)                      \
-    SET_EBDA2(get_ebda_seg(), var, (val))
-
-#define EBDA_OFFSET_TOP_STACK                                   \
-    offsetof(struct extended_bios_data_area_s, extra_stack[     \
-                 FIELD_SIZEOF(struct extended_bios_data_area_s  \
-                              , extra_stack)])
 
 
 /****************************************************************
  * Global variables
  ****************************************************************/
 
+#if MODE16 == 0 && MODESEGMENT == 1
+// In 32bit segmented mode %cs may not be readable and the code may be
+// relocated.  The entry code sets up %gs with a readable segment and
+// the code offset can be determined by get_global_offset().
+#define GLOBAL_SEGREG GS
+static inline u32 __attribute_const get_global_offset(void) {
+    u32 ret;
+    asm("  calll 1f\n"
+        "1:popl %0\n"
+        "  subl $1b, %0"
+        : "=r"(ret));
+    return ret;
+}
+#else
 #define GLOBAL_SEGREG CS
-static inline u16 get_global_seg() {
+static inline u32 __attribute_const get_global_offset(void) {
+    return 0;
+}
+#endif
+static inline u16 get_global_seg(void) {
     return GET_SEG(GLOBAL_SEGREG);
 }
-#define GET_GLOBAL(var)                         \
-    GET_VAR(GLOBAL_SEGREG, (var))
+#define GET_GLOBAL(var)                                                 \
+    GET_VAR(GLOBAL_SEGREG, *(typeof(&(var)))((void*)&(var)              \
+                                             + get_global_offset()))
 #define SET_GLOBAL(var, val) do {               \
-        ASSERT32();                             \
+        ASSERT32FLAT();                         \
         (var) = (val);                          \
     } while (0)
-#if MODE16
-#define ADJUST_GLOBAL_PTR(var) (var)
+#if MODESEGMENT
+#define GLOBALFLAT2GLOBAL(var) ((typeof(var))((void*)(var) - BUILD_BIOS_ADDR))
 #else
-#define ADJUST_GLOBAL_PTR(var) ((typeof(var))((void*)var - BUILD_BIOS_ADDR))
+#define GLOBALFLAT2GLOBAL(var) (var)
 #endif
+// Access a "flat" pointer known to point to the f-segment.
+#define GET_GLOBALFLAT(var) GET_GLOBAL(*GLOBALFLAT2GLOBAL(&(var)))
+
+
+/****************************************************************
+ * "Low" memory variables
+ ****************************************************************/
+
+extern u8 _datalow_seg, datalow_base[];
+#define SEG_LOW ((u32)&_datalow_seg)
+
+#if MODESEGMENT
+#define GET_LOW(var)            GET_FARVAR(SEG_LOW, (var))
+#define SET_LOW(var, val)       SET_FARVAR(SEG_LOW, (var), (val))
+#define LOWFLAT2LOW(var) ((typeof(var))((void*)(var) - (u32)datalow_base))
+#else
+#define GET_LOW(var)            (var)
+#define SET_LOW(var, val)       do { (var) = (val); } while (0)
+#define LOWFLAT2LOW(var) (var)
+#endif
+#define GET_LOWFLAT(var) GET_LOW(*LOWFLAT2LOW(&(var)))
+#define SET_LOWFLAT(var, val) SET_LOW(*LOWFLAT2LOW(&(var)), (val))
 
 
 /****************************************************************

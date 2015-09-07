@@ -55,6 +55,13 @@ tcp_init(Slirp *slirp)
     slirp->tcp_last_so = &slirp->tcb;
 }
 
+void tcp_cleanup(Slirp *slirp)
+{
+    while (slirp->tcb.so_next != &slirp->tcb) {
+        tcp_close(sototcpcb(slirp->tcb.so_next));
+    }
+}
+
 /*
  * Create template to be used to send tcp packets on a connection.
  * Call after host entry created, fills
@@ -107,9 +114,9 @@ tcp_respond(struct tcpcb *tp, struct tcpiphdr *ti, struct mbuf *m,
 	int win = 0;
 
 	DEBUG_CALL("tcp_respond");
-	DEBUG_ARG("tp = %lx", (long)tp);
-	DEBUG_ARG("ti = %lx", (long)ti);
-	DEBUG_ARG("m = %lx", (long)m);
+	DEBUG_ARG("tp = %p", tp);
+	DEBUG_ARG("ti = %p", ti);
+	DEBUG_ARG("m = %p", m);
 	DEBUG_ARG("ack = %u", ack);
 	DEBUG_ARG("seq = %u", seq);
 	DEBUG_ARG("flags = %x", flags);
@@ -117,7 +124,7 @@ tcp_respond(struct tcpcb *tp, struct tcpiphdr *ti, struct mbuf *m,
 	if (tp)
 		win = sbspace(&tp->t_socket->so_rcv);
         if (m == NULL) {
-		if ((m = m_get(tp->t_socket->slirp)) == NULL)
+		if (!tp || (m = m_get(tp->t_socket->slirp)) == NULL)
 			return;
 		tlen = 0;
 		m->m_data += IF_MAXLINKHDR;
@@ -134,8 +141,8 @@ tcp_respond(struct tcpcb *tp, struct tcpiphdr *ti, struct mbuf *m,
 		m->m_len = sizeof (struct tcpiphdr);
 		tlen = 0;
 #define xchg(a,b,type) { type t; t=a; a=b; b=t; }
-		xchg(ti->ti_dst.s_addr, ti->ti_src.s_addr, u_int32_t);
-		xchg(ti->ti_dport, ti->ti_sport, u_int16_t);
+		xchg(ti->ti_dst.s_addr, ti->ti_src.s_addr, uint32_t);
+		xchg(ti->ti_dport, ti->ti_sport, uint16_t);
 #undef xchg
 	}
 	ti->ti_len = htons((u_short)(sizeof (struct tcphdr) + tlen));
@@ -150,9 +157,9 @@ tcp_respond(struct tcpcb *tp, struct tcpiphdr *ti, struct mbuf *m,
 	ti->ti_off = sizeof (struct tcphdr) >> 2;
 	ti->ti_flags = flags;
 	if (tp)
-		ti->ti_win = htons((u_int16_t) (win >> tp->rcv_scale));
+		ti->ti_win = htons((uint16_t) (win >> tp->rcv_scale));
 	else
-		ti->ti_win = htons((u_int16_t)win);
+		ti->ti_win = htons((uint16_t)win);
 	ti->ti_urp = 0;
 	ti->ti_sum = 0;
 	ti->ti_sum = cksum(m, tlen);
@@ -250,7 +257,7 @@ tcp_close(struct tcpcb *tp)
 		t = tcpiphdr_next(t);
 		m = tcpiphdr_prev(t)->ti_mbuf;
 		remque(tcpiphdr2qlink(tcpiphdr_prev(t)));
-		m_freem(m);
+		m_free(m);
 	}
 	free(tp);
         so->so_tcpcb = NULL;
@@ -329,7 +336,7 @@ int tcp_fconnect(struct socket *so)
     int opt, s=so->s;
     struct sockaddr_in addr;
 
-    fd_nonblock(s);
+    socket_set_nonblock(s);
     opt = 1;
     setsockopt(s,SOL_SOCKET,SO_REUSEADDR,(char *)&opt,sizeof(opt ));
     opt = 1;
@@ -417,7 +424,7 @@ tcp_connect(struct socket *inso)
 		tcp_close(sototcpcb(so)); /* This will sofree() as well */
 		return;
 	}
-	fd_nonblock(s);
+	socket_set_nonblock(s);
 	opt = 1;
 	setsockopt(s,SOL_SOCKET,SO_REUSEADDR,(char *)&opt,sizeof(int));
 	opt = 1;
@@ -428,8 +435,11 @@ tcp_connect(struct socket *inso)
 	so->so_fport = addr.sin_port;
 	so->so_faddr = addr.sin_addr;
 	/* Translate connections from localhost to the real hostname */
-	if (so->so_faddr.s_addr == 0 || so->so_faddr.s_addr == loopback_addr.s_addr)
-	   so->so_faddr = slirp->vhost_addr;
+        if (so->so_faddr.s_addr == 0 ||
+            (so->so_faddr.s_addr & loopback_mask) ==
+            (loopback_addr.s_addr & loopback_mask)) {
+            so->so_faddr = slirp->vhost_addr;
+        }
 
 	/* Close the accept() socket, set right state */
 	if (inso->so_state & SS_FACCEPTONCE) {
@@ -491,7 +501,7 @@ static struct emu_t *tcpemu = NULL;
 /*
  * Return TOS according to the above table
  */
-u_int8_t
+uint8_t
 tcp_tos(struct socket *so)
 {
 	int i = 0;
@@ -548,7 +558,7 @@ tcp_emu(struct socket *so, struct mbuf *m)
 	Slirp *slirp = so->slirp;
 	u_int n1, n2, n3, n4, n5, n6;
         char buff[257];
-	u_int32_t laddr;
+	uint32_t laddr;
 	u_int lport;
 	char *bptr;
 
@@ -857,7 +867,7 @@ tcp_emu(struct socket *so, struct mbuf *m)
 				if (p == 7071)
 				   p = 0;
 				*(u_char *)bptr++ = (p >> 8) & 0xff;
-				*(u_char *)bptr++ = p & 0xff;
+                                *(u_char *)bptr = p & 0xff;
 				ra = 0;
 				return 1;   /* port redirected, we're done */
 				break;
@@ -902,7 +912,7 @@ int tcp_ctl(struct socket *so)
                     return 1;
                 }
                 do_pty = ex_ptr->ex_pty;
-                DEBUG_MISC((dfd, " executing %s \n",ex_ptr->ex_exec));
+                DEBUG_MISC((dfd, " executing %s\n", ex_ptr->ex_exec));
                 return fork_exec(so, ex_ptr->ex_exec, do_pty);
             }
         }

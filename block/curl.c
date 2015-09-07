@@ -29,9 +29,9 @@
 // #define DEBUG_VERBOSE
 
 #ifdef DEBUG_CURL
-#define dprintf(fmt, ...) do { printf(fmt, ## __VA_ARGS__); } while (0)
+#define DPRINTF(fmt, ...) do { printf(fmt, ## __VA_ARGS__); } while (0)
 #else
-#define dprintf(fmt, ...) do { } while (0)
+#define DPRINTF(fmt, ...) do { } while (0)
 #endif
 
 #define CURL_NUM_STATES 8
@@ -47,7 +47,12 @@ struct BDRVCURLState;
 
 typedef struct CURLAIOCB {
     BlockDriverAIOCB common;
+    QEMUBH *bh;
     QEMUIOVector *qiov;
+
+    int64_t sector_num;
+    int nb_sectors;
+
     size_t start;
     size_t end;
 } CURLAIOCB;
@@ -76,24 +81,25 @@ typedef struct BDRVCURLState {
 
 static void curl_clean_state(CURLState *s);
 static void curl_multi_do(void *arg);
+static int curl_aio_flush(void *opaque);
 
 static int curl_sock_cb(CURL *curl, curl_socket_t fd, int action,
                         void *s, void *sp)
 {
-    dprintf("CURL (AIO): Sock action %d on fd %d\n", action, fd);
+    DPRINTF("CURL (AIO): Sock action %d on fd %d\n", action, fd);
     switch (action) {
         case CURL_POLL_IN:
-            qemu_aio_set_fd_handler(fd, curl_multi_do, NULL, NULL, NULL, s);
+            qemu_aio_set_fd_handler(fd, curl_multi_do, NULL, curl_aio_flush, s);
             break;
         case CURL_POLL_OUT:
-            qemu_aio_set_fd_handler(fd, NULL, curl_multi_do, NULL, NULL, s);
+            qemu_aio_set_fd_handler(fd, NULL, curl_multi_do, curl_aio_flush, s);
             break;
         case CURL_POLL_INOUT:
-            qemu_aio_set_fd_handler(fd, curl_multi_do,
-                                    curl_multi_do, NULL, NULL, s);
+            qemu_aio_set_fd_handler(fd, curl_multi_do, curl_multi_do,
+                                    curl_aio_flush, s);
             break;
         case CURL_POLL_REMOVE:
-            qemu_aio_set_fd_handler(fd, NULL, NULL, NULL, NULL, NULL);
+            qemu_aio_set_fd_handler(fd, NULL, NULL, NULL, NULL);
             break;
     }
 
@@ -104,10 +110,11 @@ static size_t curl_size_cb(void *ptr, size_t size, size_t nmemb, void *opaque)
 {
     CURLState *s = ((CURLState*)opaque);
     size_t realsize = size * nmemb;
-    long long fsize;
+    size_t fsize;
 
-    if(sscanf(ptr, "Content-Length: %lld", &fsize) == 1)
+    if(sscanf(ptr, "Content-Length: %zd", &fsize) == 1) {
         s->s->len = fsize;
+    }
 
     return realsize;
 }
@@ -118,7 +125,7 @@ static size_t curl_read_cb(void *ptr, size_t size, size_t nmemb, void *opaque)
     size_t realsize = size * nmemb;
     int i;
 
-    dprintf("CURL: Just reading %lld bytes\n", (unsigned long long)realsize);
+    DPRINTF("CURL: Just reading %zd bytes\n", realsize);
 
     if (!s || !s->orig_buf)
         goto read_end;
@@ -133,8 +140,8 @@ static size_t curl_read_cb(void *ptr, size_t size, size_t nmemb, void *opaque)
             continue;
 
         if ((s->buf_off >= acb->end)) {
-            qemu_iovec_from_buffer(acb->qiov, s->orig_buf + acb->start,
-                                   acb->end - acb->start);
+            qemu_iovec_from_buf(acb->qiov, 0, s->orig_buf + acb->start,
+                                acb->end - acb->start);
             acb->common.cb(acb->common.opaque, 0);
             qemu_aio_release(acb);
             s->acb[i] = NULL;
@@ -169,7 +176,7 @@ static int curl_find_buf(BDRVCURLState *s, size_t start, size_t len,
         {
             char *buf = state->orig_buf + (start - state->buf_start);
 
-            qemu_iovec_from_buffer(acb->qiov, buf, len);
+            qemu_iovec_from_buf(acb->qiov, 0, buf, len);
             acb->common.cb(acb->common.opaque, 0);
 
             return FIND_RET_OK;
@@ -228,6 +235,23 @@ static void curl_multi_do(void *arg)
             {
                 CURLState *state = NULL;
                 curl_easy_getinfo(msg->easy_handle, CURLINFO_PRIVATE, (char**)&state);
+
+                /* ACBs for successful messages get completed in curl_read_cb */
+                if (msg->data.result != CURLE_OK) {
+                    int i;
+                    for (i = 0; i < CURL_NUM_ACB; i++) {
+                        CURLAIOCB *acb = state->acb[i];
+
+                        if (acb == NULL) {
+                            continue;
+                        }
+
+                        acb->common.cb(acb->common.opaque, -EIO);
+                        qemu_aio_release(acb);
+                        state->acb[i] = NULL;
+                    }
+                }
+
                 curl_clean_state(state);
                 break;
             }
@@ -256,7 +280,7 @@ static CURLState *curl_init_state(BDRVCURLState *s)
             break;
         }
         if (!state) {
-            usleep(100);
+            g_usleep(100);
             curl_multi_do(s);
         }
     } while(!state);
@@ -276,7 +300,8 @@ static CURLState *curl_init_state(BDRVCURLState *s)
     curl_easy_setopt(state->curl, CURLOPT_FOLLOWLOCATION, 1);
     curl_easy_setopt(state->curl, CURLOPT_NOSIGNAL, 1);
     curl_easy_setopt(state->curl, CURLOPT_ERRORBUFFER, state->errmsg);
-    
+    curl_easy_setopt(state->curl, CURLOPT_FAILONERROR, 1);
+
 #ifdef DEBUG_VERBOSE
     curl_easy_setopt(state->curl, CURLOPT_VERBOSE, 1);
 #endif
@@ -309,7 +334,7 @@ static int curl_open(BlockDriverState *bs, const char *filename, int flags)
 
     static int inited = 0;
 
-    file = strdup(filename);
+    file = g_strdup(filename);
     s->readahead_size = READ_AHEAD_SIZE;
 
     /* Parse a trailing ":readahead=#:" param, if present. */
@@ -339,7 +364,7 @@ static int curl_open(BlockDriverState *bs, const char *filename, int flags)
     }
 
     if ((s->readahead_size & 0x1ff) != 0) {
-        fprintf(stderr, "HTTP_READAHEAD_SIZE %Zd is not a multiple of 512\n",
+        fprintf(stderr, "HTTP_READAHEAD_SIZE %zd is not a multiple of 512\n",
                 s->readahead_size);
         goto out_noclean;
     }
@@ -349,7 +374,7 @@ static int curl_open(BlockDriverState *bs, const char *filename, int flags)
         inited = 1;
     }
 
-    dprintf("CURL: Opening %s\n", file);
+    DPRINTF("CURL: Opening %s\n", file);
     s->url = file;
     state = curl_init_state(s);
     if (!state)
@@ -368,7 +393,7 @@ static int curl_open(BlockDriverState *bs, const char *filename, int flags)
         s->len = (size_t)d;
     else if(!s->len)
         goto out;
-    dprintf("CURL: Size = %lld\n", (long long)s->len);
+    DPRINTF("CURL: Size = %zd\n", s->len);
 
     curl_clean_state(state);
     curl_easy_cleanup(state->curl);
@@ -389,8 +414,23 @@ out:
     curl_easy_cleanup(state->curl);
     state->curl = NULL;
 out_noclean:
-    qemu_free(file);
+    g_free(file);
     return -EINVAL;
+}
+
+static int curl_aio_flush(void *opaque)
+{
+    BDRVCURLState *s = opaque;
+    int i, j;
+
+    for (i=0; i < CURL_NUM_STATES; i++) {
+        for(j=0; j < CURL_NUM_ACB; j++) {
+            if (s->states[i].acb[j]) {
+                return 1;
+            }
+        }
+    }
+    return 0;
 }
 
 static void curl_aio_cancel(BlockDriverAIOCB *blockacb)
@@ -398,65 +438,87 @@ static void curl_aio_cancel(BlockDriverAIOCB *blockacb)
     // Do we have to implement canceling? Seems to work without...
 }
 
-static AIOPool curl_aio_pool = {
+static const AIOCBInfo curl_aiocb_info = {
     .aiocb_size         = sizeof(CURLAIOCB),
     .cancel             = curl_aio_cancel,
 };
 
-static BlockDriverAIOCB *curl_aio_readv(BlockDriverState *bs,
-        int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
-        BlockDriverCompletionFunc *cb, void *opaque)
+
+static void curl_readv_bh_cb(void *p)
 {
-    BDRVCURLState *s = bs->opaque;
-    CURLAIOCB *acb;
-    size_t start = sector_num * SECTOR_SIZE;
-    size_t end;
     CURLState *state;
 
-    acb = qemu_aio_get(&curl_aio_pool, bs, cb, opaque);
-    if (!acb)
-        return NULL;
+    CURLAIOCB *acb = p;
+    BDRVCURLState *s = acb->common.bs->opaque;
 
-    acb->qiov = qiov;
+    qemu_bh_delete(acb->bh);
+    acb->bh = NULL;
+
+    size_t start = acb->sector_num * SECTOR_SIZE;
+    size_t end;
 
     // In case we have the requested data already (e.g. read-ahead),
     // we can just call the callback and be done.
-
-    switch (curl_find_buf(s, start, nb_sectors * SECTOR_SIZE, acb)) {
+    switch (curl_find_buf(s, start, acb->nb_sectors * SECTOR_SIZE, acb)) {
         case FIND_RET_OK:
             qemu_aio_release(acb);
             // fall through
         case FIND_RET_WAIT:
-            return &acb->common;
+            return;
         default:
             break;
     }
 
     // No cache found, so let's start a new request
-
     state = curl_init_state(s);
-    if (!state)
-        return NULL;
+    if (!state) {
+        acb->common.cb(acb->common.opaque, -EIO);
+        qemu_aio_release(acb);
+        return;
+    }
 
     acb->start = 0;
-    acb->end = (nb_sectors * SECTOR_SIZE);
+    acb->end = (acb->nb_sectors * SECTOR_SIZE);
 
     state->buf_off = 0;
     if (state->orig_buf)
-        qemu_free(state->orig_buf);
+        g_free(state->orig_buf);
     state->buf_start = start;
     state->buf_len = acb->end + s->readahead_size;
     end = MIN(start + state->buf_len, s->len) - 1;
-    state->orig_buf = qemu_malloc(state->buf_len);
+    state->orig_buf = g_malloc(state->buf_len);
     state->acb[0] = acb;
 
-    snprintf(state->range, 127, "%lld-%lld", (long long)start, (long long)end);
-    dprintf("CURL (AIO): Reading %d at %lld (%s)\n", (nb_sectors * SECTOR_SIZE), start, state->range);
+    snprintf(state->range, 127, "%zd-%zd", start, end);
+    DPRINTF("CURL (AIO): Reading %d at %zd (%s)\n",
+            (acb->nb_sectors * SECTOR_SIZE), start, state->range);
     curl_easy_setopt(state->curl, CURLOPT_RANGE, state->range);
 
     curl_multi_add_handle(s->multi, state->curl);
     curl_multi_do(s);
 
+}
+
+static BlockDriverAIOCB *curl_aio_readv(BlockDriverState *bs,
+        int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
+        BlockDriverCompletionFunc *cb, void *opaque)
+{
+    CURLAIOCB *acb;
+
+    acb = qemu_aio_get(&curl_aiocb_info, bs, cb, opaque);
+
+    acb->qiov = qiov;
+    acb->sector_num = sector_num;
+    acb->nb_sectors = nb_sectors;
+
+    acb->bh = qemu_bh_new(curl_readv_bh_cb, acb);
+
+    if (!acb->bh) {
+        DPRINTF("CURL: qemu_bh_new failed\n");
+        return NULL;
+    }
+
+    qemu_bh_schedule(acb->bh);
     return &acb->common;
 }
 
@@ -465,7 +527,7 @@ static void curl_close(BlockDriverState *bs)
     BDRVCURLState *s = bs->opaque;
     int i;
 
-    dprintf("CURL: Close\n");
+    DPRINTF("CURL: Close\n");
     for (i=0; i<CURL_NUM_STATES; i++) {
         if (s->states[i].in_use)
             curl_clean_state(&s->states[i]);
@@ -474,14 +536,13 @@ static void curl_close(BlockDriverState *bs)
             s->states[i].curl = NULL;
         }
         if (s->states[i].orig_buf) {
-            qemu_free(s->states[i].orig_buf);
+            g_free(s->states[i].orig_buf);
             s->states[i].orig_buf = NULL;
         }
     }
     if (s->multi)
         curl_multi_cleanup(s->multi);
-    if (s->url)
-        free(s->url);
+    g_free(s->url);
 }
 
 static int64_t curl_getlength(BlockDriverState *bs)
@@ -495,7 +556,7 @@ static BlockDriver bdrv_http = {
     .protocol_name   = "http",
 
     .instance_size   = sizeof(BDRVCURLState),
-    .bdrv_open       = curl_open,
+    .bdrv_file_open  = curl_open,
     .bdrv_close      = curl_close,
     .bdrv_getlength  = curl_getlength,
 
@@ -507,7 +568,7 @@ static BlockDriver bdrv_https = {
     .protocol_name   = "https",
 
     .instance_size   = sizeof(BDRVCURLState),
-    .bdrv_open       = curl_open,
+    .bdrv_file_open  = curl_open,
     .bdrv_close      = curl_close,
     .bdrv_getlength  = curl_getlength,
 
@@ -519,7 +580,7 @@ static BlockDriver bdrv_ftp = {
     .protocol_name   = "ftp",
 
     .instance_size   = sizeof(BDRVCURLState),
-    .bdrv_open       = curl_open,
+    .bdrv_file_open  = curl_open,
     .bdrv_close      = curl_close,
     .bdrv_getlength  = curl_getlength,
 
@@ -531,7 +592,7 @@ static BlockDriver bdrv_ftps = {
     .protocol_name   = "ftps",
 
     .instance_size   = sizeof(BDRVCURLState),
-    .bdrv_open       = curl_open,
+    .bdrv_file_open  = curl_open,
     .bdrv_close      = curl_close,
     .bdrv_getlength  = curl_getlength,
 
@@ -543,7 +604,7 @@ static BlockDriver bdrv_tftp = {
     .protocol_name   = "tftp",
 
     .instance_size   = sizeof(BDRVCURLState),
-    .bdrv_open       = curl_open,
+    .bdrv_file_open  = curl_open,
     .bdrv_close      = curl_close,
     .bdrv_getlength  = curl_getlength,
 

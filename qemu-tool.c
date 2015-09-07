@@ -9,19 +9,21 @@
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
  *
+ * Contributions after 2012-01-13 are licensed under the terms of the
+ * GNU GPL, version 2 or (at your option) any later version.
  */
 
 #include "qemu-common.h"
 #include "monitor.h"
-#include "sysemu.h"
 #include "qemu-timer.h"
 #include "qemu-log.h"
+#include "migration.h"
+#include "main-loop.h"
+#include "sysemu.h"
+#include "qemu_socket.h"
+#include "slirp/libslirp.h"
 
 #include <sys/time.h>
-
-QEMUClock *rt_clock;
-
-FILE *logfile;
 
 struct QEMUBH
 {
@@ -29,11 +31,30 @@ struct QEMUBH
     void *opaque;
 };
 
-void qemu_service_io(void)
+const char *qemu_get_vm_name(void)
 {
+    return NULL;
 }
 
 Monitor *cur_mon;
+
+void vm_stop(RunState state)
+{
+    abort();
+}
+
+int monitor_cur_is_qmp(void)
+{
+    return 0;
+}
+
+void monitor_set_error(Monitor *mon, QError *qerror)
+{
+}
+
+void monitor_vprintf(Monitor *mon, const char *fmt, va_list ap)
+{
+}
 
 void monitor_printf(Monitor *mon, const char *fmt, ...)
 {
@@ -43,74 +64,52 @@ void monitor_print_filename(Monitor *mon, const char *filename)
 {
 }
 
-void async_context_push(void)
-{
-}
-
-void async_context_pop(void)
-{
-}
-
-int get_async_context_id(void)
-{
-    return 0;
-}
-
 void monitor_protocol_event(MonitorEvent event, QObject *data)
 {
 }
 
-QEMUBH *qemu_bh_new(QEMUBHFunc *cb, void *opaque)
+int64_t cpu_get_clock(void)
 {
-    QEMUBH *bh;
-
-    bh = qemu_malloc(sizeof(*bh));
-    bh->cb = cb;
-    bh->opaque = opaque;
-
-    return bh;
+    return get_clock_realtime();
 }
 
-int qemu_bh_poll(void)
+int64_t cpu_get_icount(void)
 {
-    return 0;
+    abort();
 }
 
-void qemu_bh_schedule(QEMUBH *bh)
-{
-    bh->cb(bh->opaque);
-}
-
-void qemu_bh_cancel(QEMUBH *bh)
+void qemu_mutex_lock_iothread(void)
 {
 }
 
-void qemu_bh_delete(QEMUBH *bh)
+void qemu_mutex_unlock_iothread(void)
 {
-    qemu_free(bh);
 }
 
-int qemu_set_fd_handler2(int fd,
-                         IOCanRWHandler *fd_read_poll,
-                         IOHandler *fd_read,
-                         IOHandler *fd_write,
-                         void *opaque)
+int use_icount;
+
+void qemu_clock_warp(QEMUClock *clock)
 {
-    return 0;
 }
 
-int64_t qemu_get_clock(QEMUClock *clock)
+void slirp_update_timeout(uint32_t *timeout)
 {
-    qemu_timeval tv;
-    qemu_gettimeofday(&tv);
-    return (tv.tv_sec * 1000000000LL + (tv.tv_usec * 1000)) / 1000000;
 }
 
-void qemu_error(const char *fmt, ...)
+void slirp_select_fill(int *pnfds, fd_set *readfds,
+                       fd_set *writefds, fd_set *xfds)
 {
-    va_list args;
+}
 
-    va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
-    va_end(args);
+void slirp_select_poll(fd_set *readfds, fd_set *writefds,
+                       fd_set *xfds, int select_error)
+{
+}
+
+void migrate_add_blocker(Error *reason)
+{
+}
+
+void migrate_del_blocker(Error *reason)
+{
 }

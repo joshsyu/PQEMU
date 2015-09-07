@@ -4,7 +4,7 @@
  * Copyright (c) 2006-2007 CodeSourcery.
  * Written by Paul Brook
  *
- * This code is licenced under the GPL.
+ * This code is licensed under the GPL.
  */
 
 /* The controller can support a variety of different displays, but we only
@@ -19,7 +19,9 @@
 #define DPRINTF(fmt, ...) \
 do { printf("ssd0323: " fmt , ## __VA_ARGS__); } while (0)
 #define BADF(fmt, ...) \
-do { fprintf(stderr, "ssd0323: error: " fmt , ## __VA_ARGS__); exit(1);} while (0)
+do { \
+    fprintf(stderr, "ssd0323: error: " fmt , ## __VA_ARGS__); abort(); \
+} while (0)
 #else
 #define DPRINTF(fmt, ...) do {} while(0)
 #define BADF(fmt, ...) \
@@ -258,7 +260,7 @@ static void ssd0323_update_display(void *opaque)
         }
     }
     s->redraw = 0;
-    dpy_update(s->ds, 0, 0, 128 * MAGNIFY, 64 * MAGNIFY);
+    dpy_gfx_update(s->ds, 0, 0, 128 * MAGNIFY, 64 * MAGNIFY);
 }
 
 static void ssd0323_invalidate_display(void * opaque)
@@ -277,6 +279,7 @@ static void ssd0323_cd(void *opaque, int n, int level)
 
 static void ssd0323_save(QEMUFile *f, void *opaque)
 {
+    SSISlave *ss = SSI_SLAVE(opaque);
     ssd0323_state *s = (ssd0323_state *)opaque;
     int i;
 
@@ -294,10 +297,13 @@ static void ssd0323_save(QEMUFile *f, void *opaque)
     qemu_put_be32(f, s->remap);
     qemu_put_be32(f, s->mode);
     qemu_put_buffer(f, s->framebuffer, sizeof(s->framebuffer));
+
+    qemu_put_be32(f, ss->cs);
 }
 
 static int ssd0323_load(QEMUFile *f, void *opaque, int version_id)
 {
+    SSISlave *ss = SSI_SLAVE(opaque);
     ssd0323_state *s = (ssd0323_state *)opaque;
     int i;
 
@@ -319,6 +325,8 @@ static int ssd0323_load(QEMUFile *f, void *opaque, int version_id)
     s->mode = qemu_get_be32(f);
     qemu_get_buffer(f, s->framebuffer, sizeof(s->framebuffer));
 
+    ss->cs = qemu_get_be32(f);
+
     return 0;
 }
 
@@ -335,20 +343,30 @@ static int ssd0323_init(SSISlave *dev)
 
     qdev_init_gpio_in(&dev->qdev, ssd0323_cd, 1);
 
-    register_savevm("ssd0323_oled", -1, 1, ssd0323_save, ssd0323_load, s);
+    register_savevm(&dev->qdev, "ssd0323_oled", -1, 1,
+                    ssd0323_save, ssd0323_load, s);
     return 0;
 }
 
-static SSISlaveInfo ssd0323_info = {
-    .qdev.name = "ssd0323",
-    .qdev.size = sizeof(ssd0323_state),
-    .init = ssd0323_init,
-    .transfer = ssd0323_transfer
-};
-
-static void ssd03232_register_devices(void)
+static void ssd0323_class_init(ObjectClass *klass, void *data)
 {
-    ssi_register_slave(&ssd0323_info);
+    SSISlaveClass *k = SSI_SLAVE_CLASS(klass);
+
+    k->init = ssd0323_init;
+    k->transfer = ssd0323_transfer;
+    k->cs_polarity = SSI_CS_HIGH;
 }
 
-device_init(ssd03232_register_devices)
+static TypeInfo ssd0323_info = {
+    .name          = "ssd0323",
+    .parent        = TYPE_SSI_SLAVE,
+    .instance_size = sizeof(ssd0323_state),
+    .class_init    = ssd0323_class_init,
+};
+
+static void ssd03232_register_types(void)
+{
+    type_register_static(&ssd0323_info);
+}
+
+type_init(ssd03232_register_types)

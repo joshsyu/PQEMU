@@ -38,16 +38,12 @@
 ((1 << CP0C2_M))
 
 /* No config4, no DSP ASE, no large physaddr (PABITS),
-   no external interrupt controller, no vectored interupts,
+   no external interrupt controller, no vectored interrupts,
    no 1kb pages, no SmartMIPS ASE, no trace logic */
 #define MIPS_CONFIG3                                              \
 ((0 << CP0C3_M) | (0 << CP0C3_DSPP) | (0 << CP0C3_LPA) |          \
  (0 << CP0C3_VEIC) | (0 << CP0C3_VInt) | (0 << CP0C3_SP) |        \
  (0 << CP0C3_SM) | (0 << CP0C3_TL))
-
-/* Define a implementation number of 1.
-   Define a major version 1, minor version 0. */
-#define MIPS_FCR0 ((0 << FCR0_S) | (0x1 << FCR0_PRID) | (0x10 << FCR0_REV))
 
 /* MMU types, the first four entries have the same layout as the
    CP0C0_MT field.  */
@@ -104,7 +100,8 @@ static const mips_def_t mips_defs[] =
         .CP0_Config0 = MIPS_CONFIG0 | (MMU_TYPE_R4000 << CP0C0_MT),
         .CP0_Config1 = MIPS_CONFIG1 | (15 << CP0C1_MMU) |
                        (0 << CP0C1_IS) | (3 << CP0C1_IL) | (1 << CP0C1_IA) |
-                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA),
+                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA) |
+                       (0 << CP0C1_CA),
         .CP0_Config2 = MIPS_CONFIG2,
         .CP0_Config3 = MIPS_CONFIG3,
         .CP0_LLAddr_rw_bitmask = 0,
@@ -114,7 +111,7 @@ static const mips_def_t mips_defs[] =
         .CP0_Status_rw_bitmask = 0x1278FF17,
         .SEGBITS = 32,
         .PABITS = 32,
-        .insn_flags = CPU_MIPS32 | ASE_MIPS16,
+        .insn_flags = CPU_MIPS32,
         .mmu_type = MMU_TYPE_R4000,
     },
     {
@@ -125,7 +122,8 @@ static const mips_def_t mips_defs[] =
         .CP0_Config0 = MIPS_CONFIG0 | (MMU_TYPE_FMT << CP0C0_MT),
         .CP0_Config1 = MIPS_CONFIG1 |
                        (0 << CP0C1_IS) | (3 << CP0C1_IL) | (1 << CP0C1_IA) |
-                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA),
+                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA) |
+                       (1 << CP0C1_CA),
         .CP0_Config2 = MIPS_CONFIG2,
         .CP0_Config3 = MIPS_CONFIG3,
         .CP0_LLAddr_rw_bitmask = 0,
@@ -144,7 +142,8 @@ static const mips_def_t mips_defs[] =
         .CP0_Config0 = MIPS_CONFIG0 | (MMU_TYPE_R4000 << CP0C0_MT),
         .CP0_Config1 = MIPS_CONFIG1 | (15 << CP0C1_MMU) |
                        (0 << CP0C1_IS) | (3 << CP0C1_IL) | (1 << CP0C1_IA) |
-                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA),
+                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA) |
+                       (0 << CP0C1_CA),
         .CP0_Config2 = MIPS_CONFIG2,
         .CP0_Config3 = MIPS_CONFIG3,
         .CP0_LLAddr_rw_bitmask = 0,
@@ -154,7 +153,7 @@ static const mips_def_t mips_defs[] =
         .CP0_Status_rw_bitmask = 0x1278FF17,
         .SEGBITS = 32,
         .PABITS = 32,
-        .insn_flags = CPU_MIPS32 | ASE_MIPS16,
+        .insn_flags = CPU_MIPS32,
         .mmu_type = MMU_TYPE_R4000,
     },
     {
@@ -163,7 +162,8 @@ static const mips_def_t mips_defs[] =
         .CP0_Config0 = MIPS_CONFIG0 | (MMU_TYPE_FMT << CP0C0_MT),
         .CP0_Config1 = MIPS_CONFIG1 |
                        (0 << CP0C1_IS) | (3 << CP0C1_IL) | (1 << CP0C1_IA) |
-                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA),
+                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA) |
+                       (1 << CP0C1_CA),
         .CP0_Config2 = MIPS_CONFIG2,
         .CP0_Config3 = MIPS_CONFIG3,
         .CP0_LLAddr_rw_bitmask = 0,
@@ -183,7 +183,8 @@ static const mips_def_t mips_defs[] =
                     (MMU_TYPE_R4000 << CP0C0_MT),
         .CP0_Config1 = MIPS_CONFIG1 | (15 << CP0C1_MMU) |
                        (0 << CP0C1_IS) | (3 << CP0C1_IL) | (1 << CP0C1_IA) |
-                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA),
+                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA) |
+                       (0 << CP0C1_CA),
         .CP0_Config2 = MIPS_CONFIG2,
         .CP0_Config3 = MIPS_CONFIG3 | (0 << CP0C3_VInt),
         .CP0_LLAddr_rw_bitmask = 0,
@@ -193,7 +194,7 @@ static const mips_def_t mips_defs[] =
         .CP0_Status_rw_bitmask = 0x1278FF17,
         .SEGBITS = 32,
         .PABITS = 32,
-        .insn_flags = CPU_MIPS32R2 | ASE_MIPS16,
+        .insn_flags = CPU_MIPS32R2,
         .mmu_type = MMU_TYPE_R4000,
     },
     {
@@ -203,7 +204,8 @@ static const mips_def_t mips_defs[] =
                        (MMU_TYPE_FMT << CP0C0_MT),
         .CP0_Config1 = MIPS_CONFIG1 |
                        (0 << CP0C1_IS) | (3 << CP0C1_IL) | (1 << CP0C1_IA) |
-                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA),
+                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA) |
+                       (1 << CP0C1_CA),
         .CP0_Config2 = MIPS_CONFIG2,
         .CP0_Config3 = MIPS_CONFIG3,
         .CP0_LLAddr_rw_bitmask = 0,
@@ -223,7 +225,8 @@ static const mips_def_t mips_defs[] =
                        (MMU_TYPE_R4000 << CP0C0_MT),
         .CP0_Config1 = MIPS_CONFIG1 | (15 << CP0C1_MMU) |
                        (0 << CP0C1_IS) | (3 << CP0C1_IL) | (1 << CP0C1_IA) |
-                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA),
+                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA) |
+                       (1 << CP0C1_CA),
         .CP0_Config2 = MIPS_CONFIG2,
         .CP0_Config3 = MIPS_CONFIG3 | (0 << CP0C3_VInt),
         .CP0_LLAddr_rw_bitmask = 0,
@@ -244,7 +247,8 @@ static const mips_def_t mips_defs[] =
                     (MMU_TYPE_R4000 << CP0C0_MT),
         .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (15 << CP0C1_MMU) |
                        (0 << CP0C1_IS) | (3 << CP0C1_IL) | (1 << CP0C1_IA) |
-                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA),
+                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA) |
+                       (1 << CP0C1_CA),
         .CP0_Config2 = MIPS_CONFIG2,
         .CP0_Config3 = MIPS_CONFIG3 | (0 << CP0C3_VInt),
         .CP0_LLAddr_rw_bitmask = 0,
@@ -267,9 +271,10 @@ static const mips_def_t mips_defs[] =
                        (MMU_TYPE_R4000 << CP0C0_MT),
         .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (15 << CP0C1_MMU) |
                        (0 << CP0C1_IS) | (3 << CP0C1_IL) | (1 << CP0C1_IA) |
-                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA),
+                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA) |
+                       (1 << CP0C1_CA),
         .CP0_Config2 = MIPS_CONFIG2,
-        .CP0_Config3 = MIPS_CONFIG3 | (0 << CP0C3_VInt) | (1 << CP0C3_MT),
+        .CP0_Config3 = MIPS_CONFIG3 | (1 << CP0C3_VInt) | (1 << CP0C3_MT),
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 0,
         .SYNCI_Step = 32,
@@ -304,6 +309,29 @@ static const mips_def_t mips_defs[] =
         .SEGBITS = 32,
         .PABITS = 32,
         .insn_flags = CPU_MIPS32R2 | ASE_MIPS16 | ASE_DSP | ASE_MT,
+        .mmu_type = MMU_TYPE_R4000,
+    },
+    {
+        .name = "74Kf",
+        .CP0_PRid = 0x00019700,
+        .CP0_Config0 = MIPS_CONFIG0 | (0x1 << CP0C0_AR) |
+                    (MMU_TYPE_R4000 << CP0C0_MT),
+        .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (15 << CP0C1_MMU) |
+                       (0 << CP0C1_IS) | (3 << CP0C1_IL) | (1 << CP0C1_IA) |
+                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA) |
+                       (1 << CP0C1_CA),
+        .CP0_Config2 = MIPS_CONFIG2,
+        .CP0_Config3 = MIPS_CONFIG3 | (0 << CP0C3_VInt) | (1 << CP0C3_DSPP),
+        .CP0_LLAddr_rw_bitmask = 0,
+        .CP0_LLAddr_shift = 4,
+        .SYNCI_Step = 32,
+        .CCRes = 2,
+        .CP0_Status_rw_bitmask = 0x3778FF1F,
+        .CP1_fcr0 = (1 << FCR0_F64) | (1 << FCR0_L) | (1 << FCR0_W) |
+                    (1 << FCR0_D) | (1 << FCR0_S) | (0x93 << FCR0_PRID),
+        .SEGBITS = 32,
+        .PABITS = 32,
+        .insn_flags = CPU_MIPS32R2 | ASE_MIPS16 | ASE_DSP | ASE_DSPR2,
         .mmu_type = MMU_TYPE_R4000,
     },
 #if defined(TARGET_MIPS64)
@@ -445,6 +473,70 @@ static const mips_def_t mips_defs[] =
         .insn_flags = CPU_MIPS64R2 | ASE_MIPS3D,
         .mmu_type = MMU_TYPE_R4000,
     },
+    {
+        .name = "Loongson-2E",
+        .CP0_PRid = 0x6302,
+        /*64KB I-cache and d-cache. 4 way with 32 bit cache line size*/
+        .CP0_Config0 = (0x1<<17) | (0x1<<16) | (0x1<<11) | (0x1<<8) | (0x1<<5) |
+                       (0x1<<4) | (0x1<<1),
+        /* Note: Config1 is only used internally, Loongson-2E has only Config0. */
+        .CP0_Config1 = (1 << CP0C1_FP) | (47 << CP0C1_MMU),
+        .SYNCI_Step = 16,
+        .CCRes = 2,
+        .CP0_Status_rw_bitmask = 0x35D0FFFF,
+        .CP1_fcr0 = (0x5 << FCR0_PRID) | (0x1 << FCR0_REV),
+        .SEGBITS = 40,
+        .PABITS = 40,
+        .insn_flags = CPU_LOONGSON2E,
+        .mmu_type = MMU_TYPE_R4000,
+    },
+    {
+      .name = "Loongson-2F",
+      .CP0_PRid = 0x6303,
+      /*64KB I-cache and d-cache. 4 way with 32 bit cache line size*/
+      .CP0_Config0 = (0x1<<17) | (0x1<<16) | (0x1<<11) | (0x1<<8) | (0x1<<5) |
+                     (0x1<<4) | (0x1<<1),
+      /* Note: Config1 is only used internally, Loongson-2F has only Config0. */
+      .CP0_Config1 = (1 << CP0C1_FP) | (47 << CP0C1_MMU),
+      .SYNCI_Step = 16,
+      .CCRes = 2,
+      .CP0_Status_rw_bitmask = 0xF5D0FF1F,   /*bit5:7 not writable*/
+      .CP1_fcr0 = (0x5 << FCR0_PRID) | (0x1 << FCR0_REV),
+      .SEGBITS = 40,
+      .PABITS = 40,
+      .insn_flags = CPU_LOONGSON2F,
+      .mmu_type = MMU_TYPE_R4000,
+    },
+    {
+        /* A generic CPU providing MIPS64 ASE DSP 2 features.
+           FIXME: Eventually this should be replaced by a real CPU model. */
+        .name = "mips64dspr2",
+        .CP0_PRid = 0x00010000,
+        .CP0_Config0 = MIPS_CONFIG0 | (0x1 << CP0C0_AR) | (0x2 << CP0C0_AT) |
+                       (MMU_TYPE_R4000 << CP0C0_MT),
+        .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (63 << CP0C1_MMU) |
+                       (2 << CP0C1_IS) | (4 << CP0C1_IL) | (3 << CP0C1_IA) |
+                       (2 << CP0C1_DS) | (4 << CP0C1_DL) | (3 << CP0C1_DA) |
+                       (1 << CP0C1_PC) | (1 << CP0C1_WR) | (1 << CP0C1_EP),
+        .CP0_Config2 = MIPS_CONFIG2,
+        .CP0_Config3 = MIPS_CONFIG3 | (1 << CP0C3_LPA),
+        .CP0_LLAddr_rw_bitmask = 0,
+        .CP0_LLAddr_shift = 0,
+        .SYNCI_Step = 32,
+        .CCRes = 2,
+        .CP0_Status_rw_bitmask = 0x37FBFFFF,
+        .CP1_fcr0 = (1 << FCR0_F64) | (1 << FCR0_3D) | (1 << FCR0_PS) |
+                    (1 << FCR0_L) | (1 << FCR0_W) | (1 << FCR0_D) |
+                    (1 << FCR0_S) | (0x00 << FCR0_PRID) | (0x0 << FCR0_REV),
+        .SEGBITS = 42,
+        /* The architectural limit is 59, but we have hardcoded 36 bit
+           in some places...
+        .PABITS = 59, */ /* the architectural limit */
+        .PABITS = 36,
+        .insn_flags = CPU_MIPS64R2 | ASE_DSP | ASE_DSPR2,
+        .mmu_type = MMU_TYPE_R4000,
+    },
+
 #endif
 };
 
@@ -460,7 +552,7 @@ static const mips_def_t *cpu_mips_find_by_name (const char *name)
     return NULL;
 }
 
-void mips_cpu_list (FILE *f, int (*cpu_fprintf)(FILE *f, const char *fmt, ...))
+void mips_cpu_list (FILE *f, fprintf_function cpu_fprintf)
 {
     int i;
 
@@ -495,7 +587,7 @@ static void r4k_mmu_init (CPUMIPSState *env, const mips_def_t *def)
 
 static void mmu_init (CPUMIPSState *env, const mips_def_t *def)
 {
-    env->tlb = qemu_mallocz(sizeof(CPUMIPSTLBContext));
+    env->tlb = g_malloc0(sizeof(CPUMIPSTLBContext));
 
     switch (def->mmu_type) {
         case MMU_TYPE_NONE:
@@ -528,7 +620,7 @@ static void fpu_init (CPUMIPSState *env, const mips_def_t *def)
 
 static void mvp_init (CPUMIPSState *env, const mips_def_t *def)
 {
-    env->mvp = qemu_mallocz(sizeof(CPUMIPSMVPContext));
+    env->mvp = g_malloc0(sizeof(CPUMIPSMVPContext));
 
     /* MVPConf1 implemented, TLB sharable, no gating storage support,
        programmable cache partitioning implemented, number of allocatable
@@ -540,7 +632,7 @@ static void mvp_init (CPUMIPSState *env, const mips_def_t *def)
 //                             (1 << CP0MVPC0_TCA) | (0x1 << CP0MVPC0_PVPE) |
 //                             (0x04 << CP0MVPC0_PTC);
                              (1 << CP0MVPC0_TCA) | (0x0 << CP0MVPC0_PVPE) |
-                             (0x04 << CP0MVPC0_PTC);
+                             (0x00 << CP0MVPC0_PTC);
 #if !defined(CONFIG_USER_ONLY)
     /* Usermode has no TLB support */
     env->mvp->CP0_MVPConf0 |= (env->tlb->nb_tlb << CP0MVPC0_PTLBE);

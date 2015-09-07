@@ -9,7 +9,8 @@
 #include "util.h" // debug_enter
 #include "config.h" // CONFIG_*
 #include "bregs.h" // struct bregs
-#include "ps2port.h" // kbd_command
+#include "ps2port.h" // ps2_kbd_command
+#include "usb-hid.h" // usb_kbd_command
 
 // Bit definitions for BDA kbd_flag[012]
 #define KF0_RSHIFT       (1<<0)
@@ -34,7 +35,7 @@
 #define KF2_101KBD     (1<<4)
 
 void
-kbd_setup()
+kbd_setup(void)
 {
     dprintf(3, "init keyboard\n");
     u16 x = offsetof(struct bios_data_area_s, kbd_buf);
@@ -73,6 +74,7 @@ enqueue_key(u8 scan_code, u8 ascii_code)
 static void
 dequeue_key(struct bregs *regs, int incr, int extended)
 {
+    yield();
     u16 buffer_head;
     u16 buffer_tail;
     for (;;) {
@@ -85,7 +87,7 @@ dequeue_key(struct bregs *regs, int incr, int extended)
             regs->flags |= F_ZF;
             return;
         }
-        wait_irq();
+        yield_toirq();
     }
 
     u8 ascii_code = GET_FARVAR(SEG_BDA, *(u8*)(buffer_head+0));
@@ -108,6 +110,14 @@ dequeue_key(struct bregs *regs, int incr, int extended)
     SET_BDA(kbd_buf_head, buffer_head);
 }
 
+static int
+kbd_command(int command, u8 *param)
+{
+    if (usb_kbd_active())
+        return stack_hop(command, (u32)param, usb_kbd_command);
+    return stack_hop(command, (u32)param, ps2_kbd_command);
+}
+
 // read keyboard input
 static void
 handle_1600(struct bregs *regs)
@@ -126,6 +136,7 @@ handle_1601(struct bregs *regs)
 static void
 handle_1602(struct bregs *regs)
 {
+    yield();
     regs->al = GET_BDA(kbd_flag0);
 }
 
@@ -154,7 +165,7 @@ handle_1609(struct bregs *regs)
 }
 
 // GET KEYBOARD ID
-static void
+static void noinline
 handle_160a(struct bregs *regs)
 {
     u8 param[2];
@@ -184,6 +195,7 @@ handle_1611(struct bregs *regs)
 static void
 handle_1612(struct bregs *regs)
 {
+    yield();
     regs->al = GET_BDA(kbd_flag0);
     regs->ah = ((GET_BDA(kbd_flag1) & ~(KF2_RCTRL|KF2_RALT))
                 | (GET_BDA(kbd_flag2) & (KF2_RCTRL|KF2_RALT)));
@@ -219,8 +231,8 @@ handle_16XX(struct bregs *regs)
     warn_unimplemented(regs);
 }
 
-static void
-set_leds()
+static void noinline
+set_leds(void)
 {
     u8 shift_flags = (GET_BDA(kbd_flag0) >> 4) & 0x07;
     u8 kbd_led = GET_BDA(kbd_led);
@@ -366,10 +378,8 @@ static struct scaninfo {
     { 0x8600, 0x8800, 0x8a00, 0x8c00, none }, /* F12 */
 };
 
-// Handle a scancode read from the ps2 port.  Note that "noinline" is
-// used to make sure the call to call16_simpint in process_key doesn't
-// have the overhead of this function's stack.
-static void noinline
+// Handle a ps2 style scancode read from the keyboard.
+static void
 __process_key(u8 scancode)
 {
     u8 flags0 = GET_BDA(kbd_flag0);
@@ -550,12 +560,14 @@ process_key(u8 key)
 
     if (CONFIG_KBD_CALL_INT15_4F) {
         // allow for keyboard intercept
-        u32 eax = (0x4f << 8) | key;
-        u32 flags;
-        call16_simpint(0x15, &eax, &flags);
-        if (!(flags & F_CF))
+        struct bregs br;
+        memset(&br, 0, sizeof(br));
+        br.eax = (0x4f << 8) | key;
+        br.flags = F_IF|F_CF;
+        call16_int(0x15, &br);
+        if (!(br.flags & F_CF))
             return;
-        key = eax;
+        key = br.eax;
     }
     __process_key(key);
 }

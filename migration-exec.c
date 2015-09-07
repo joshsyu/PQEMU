@@ -11,71 +11,65 @@
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
  *
+ * Contributions after 2012-01-13 are licensed under the terms of the
+ * GNU GPL, version 2 or (at your option) any later version.
  */
 
 #include "qemu-common.h"
 #include "qemu_socket.h"
 #include "migration.h"
 #include "qemu-char.h"
-#include "sysemu.h"
 #include "buffered_file.h"
 #include "block.h"
+#include <sys/types.h>
+#include <sys/wait.h>
 
 //#define DEBUG_MIGRATION_EXEC
 
 #ifdef DEBUG_MIGRATION_EXEC
-#define dprintf(fmt, ...) \
+#define DPRINTF(fmt, ...) \
     do { printf("migration-exec: " fmt, ## __VA_ARGS__); } while (0)
 #else
-#define dprintf(fmt, ...) \
+#define DPRINTF(fmt, ...) \
     do { } while (0)
 #endif
 
-static int file_errno(FdMigrationState *s)
+static int file_errno(MigrationState *s)
 {
     return errno;
 }
 
-static int file_write(FdMigrationState *s, const void * buf, size_t size)
+static int file_write(MigrationState *s, const void * buf, size_t size)
 {
     return write(s->fd, buf, size);
 }
 
-static int exec_close(FdMigrationState *s)
+static int exec_close(MigrationState *s)
 {
-    dprintf("exec_close\n");
-    if (s->opaque) {
-        qemu_fclose(s->opaque);
-        s->opaque = NULL;
-        s->fd = -1;
+    int ret = 0;
+    DPRINTF("exec_close\n");
+    ret = qemu_fclose(s->opaque);
+    s->opaque = NULL;
+    s->fd = -1;
+    if (ret >= 0 && !(WIFEXITED(ret) && WEXITSTATUS(ret) == 0)) {
+        /* close succeeded, but non-zero exit code: */
+        ret = -EIO; /* fake errno value */
     }
-    return 0;
+    return ret;
 }
 
-MigrationState *exec_start_outgoing_migration(Monitor *mon,
-                                              const char *command,
-					      int64_t bandwidth_limit,
-					      int detach,
-					      int blk,
-					      int inc)
+void exec_start_outgoing_migration(MigrationState *s, const char *command, Error **errp)
 {
-    FdMigrationState *s;
     FILE *f;
-
-    s = qemu_mallocz(sizeof(*s));
 
     f = popen(command, "w");
     if (f == NULL) {
-        dprintf("Unable to popen exec target\n");
-        goto err_after_alloc;
+        error_setg_errno(errp, errno, "failed to popen the migration target");
+        return;
     }
 
     s->fd = fileno(f);
-    if (s->fd == -1) {
-        dprintf("Unable to retrieve file descriptor for popen'd handle\n");
-        goto err_after_open;
-    }
-
+    assert(s->fd != -1);
     socket_set_nonblock(s->fd);
 
     s->opaque = qemu_popen(f, "w");
@@ -83,66 +77,29 @@ MigrationState *exec_start_outgoing_migration(Monitor *mon,
     s->close = exec_close;
     s->get_error = file_errno;
     s->write = file_write;
-    s->mig_state.cancel = migrate_fd_cancel;
-    s->mig_state.get_status = migrate_fd_get_status;
-    s->mig_state.release = migrate_fd_release;
-
-    s->mig_state.blk = blk;
-    s->mig_state.shared = inc;
-
-    s->state = MIG_STATE_ACTIVE;
-    s->mon = NULL;
-    s->bandwidth_limit = bandwidth_limit;
-
-    if (!detach) {
-        migrate_fd_monitor_suspend(s, mon);
-    }
 
     migrate_fd_connect(s);
-    return &s->mig_state;
-
-err_after_open:
-    pclose(f);
-err_after_alloc:
-    qemu_free(s);
-    return NULL;
 }
 
 static void exec_accept_incoming_migration(void *opaque)
 {
     QEMUFile *f = opaque;
-    int ret;
 
-    ret = qemu_loadvm_state(f);
-    if (ret < 0) {
-        fprintf(stderr, "load of migration failed\n");
-        goto err;
-    }
-    qemu_announce_self();
-    dprintf("successfully loaded vm state\n");
-    /* we've successfully migrated, close the fd */
-    qemu_set_fd_handler2(qemu_stdio_fd(f), NULL, NULL, NULL, NULL);
-    if (autostart)
-        vm_start();
-
-err:
-    qemu_fclose(f);
+    qemu_set_fd_handler2(qemu_get_fd(f), NULL, NULL, NULL, NULL);
+    process_incoming_migration(f);
 }
 
-int exec_start_incoming_migration(const char *command)
+void exec_start_incoming_migration(const char *command, Error **errp)
 {
     QEMUFile *f;
 
-    dprintf("Attempting to start an incoming migration\n");
+    DPRINTF("Attempting to start an incoming migration\n");
     f = qemu_popen_cmd(command, "r");
     if(f == NULL) {
-        dprintf("Unable to apply qemu wrapper to popen file\n");
-        return -errno;
+        error_setg_errno(errp, errno, "failed to popen the migration source");
+        return;
     }
 
-    qemu_set_fd_handler2(qemu_stdio_fd(f), NULL,
-			 exec_accept_incoming_migration, NULL,
-			 (void *)(unsigned long)f);
-
-    return 0;
+    qemu_set_fd_handler2(qemu_get_fd(f), NULL,
+			 exec_accept_incoming_migration, NULL, f);
 }

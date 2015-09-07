@@ -15,14 +15,18 @@
  * GNU General Public License for more details.
 
  * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef PCIE_HOST_H
 #define PCIE_HOST_H
 
 #include "pci_host.h"
+#include "memory.h"
+
+#define TYPE_PCIE_HOST_BRIDGE "pcie-host-bridge"
+#define PCIE_HOST_BRIDGE(obj) \
+    OBJECT_CHECK(PCIExpressHost, (obj), TYPE_PCIE_HOST_BRIDGE)
 
 struct PCIExpressHost {
     PCIHostState pci;
@@ -30,21 +34,21 @@ struct PCIExpressHost {
     /* express part */
 
     /* base address where MMCONFIG area is mapped. */
-    target_phys_addr_t  base_addr;
+    hwaddr  base_addr;
 
     /* the size of MMCONFIG area. It's host bridge dependent */
-    target_phys_addr_t  size;
+    hwaddr  size;
 
-    /* result of cpu_register_io_memory() to map MMCONFIG area */
-    int mmio_index;
+    /* MMCONFIG mmio area */
+    MemoryRegion mmio;
 };
 
 int pcie_host_init(PCIExpressHost *e);
 void pcie_host_mmcfg_unmap(PCIExpressHost *e);
-void pcie_host_mmcfg_map(PCIExpressHost *e,
-                         target_phys_addr_t addr, uint32_t size);
+void pcie_host_mmcfg_map(PCIExpressHost *e, hwaddr addr, uint32_t size);
 void pcie_host_mmcfg_update(PCIExpressHost *e,
                             int enable,
-                            target_phys_addr_t addr, uint32_t size);
+                            hwaddr addr,
+                            uint32_t size);
 
 #endif /* PCIE_HOST_H */

@@ -2,11 +2,13 @@
 #define __USB_HID_H
 
 // usb-hid.c
-struct usb_interface_descriptor;
-int usb_keyboard_init(u32 endp, struct usb_interface_descriptor *iface
-                      , int imax);
-void usb_keyboard_setup();
-void usb_check_key();
+struct usbdevice_s;
+int usb_hid_init(struct usbdevice_s *usbdev);
+inline int usb_kbd_active(void);
+inline int usb_kbd_command(int command, u8 *param);
+inline int usb_mouse_active(void);
+inline int usb_mouse_command(int command, u8 *param);
+void usb_check_event(void);
 
 
 /****************************************************************

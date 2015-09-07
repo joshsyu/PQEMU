@@ -55,23 +55,23 @@ handle_10(struct bregs *regs)
 
 // NMI handler
 void VISIBLE16
-handle_02()
+handle_02(void)
 {
     debug_isr(DEBUG_ISR_02);
 }
 
 void
-mathcp_setup()
+mathcp_setup(void)
 {
     dprintf(3, "math cp init\n");
     // 80x87 coprocessor installed
-    SETBITS_BDA(equipment_list_flags, 0x02);
-    enable_hwirq(13, entry_75);
+    set_equipment_flags(0x02, 0x02);
+    enable_hwirq(13, FUNC16(entry_75));
 }
 
 // INT 75 - IRQ13 - MATH COPROCESSOR EXCEPTION
 void VISIBLE16
-handle_75()
+handle_75(void)
 {
     debug_isr(DEBUG_ISR_75);
 
@@ -80,8 +80,10 @@ handle_75()
     // clear interrupt
     eoi_pic2();
     // legacy nmi call
-    u32 eax=0, flags;
-    call16_simpint(0x02, &eax, &flags);
+    struct bregs br;
+    memset(&br, 0, sizeof(br));
+    br.flags = F_IF;
+    call16_int(0x02, &br);
 }
 
 
@@ -149,17 +151,17 @@ u64 rombios32_gdt[] VAR16VISIBLE __aligned(8) = {
     // First entry can't be used.
     0x0000000000000000LL,
     // 32 bit flat code segment (SEG32_MODE32_CS)
-    GDT_LIMIT(0xfffff) | GDT_CODE | GDT_B | GDT_G,
+    GDT_GRANLIMIT(0xffffffff) | GDT_CODE | GDT_B,
     // 32 bit flat data segment (SEG32_MODE32_DS)
-    GDT_LIMIT(0xfffff) | GDT_DATA | GDT_B | GDT_G,
+    GDT_GRANLIMIT(0xffffffff) | GDT_DATA | GDT_B,
     // 16 bit code segment base=0xf0000 limit=0xffff (SEG32_MODE16_CS)
-    GDT_LIMIT(0x0ffff) | GDT_CODE | GDT_BASE(0xf0000),
+    GDT_LIMIT(BUILD_BIOS_SIZE-1) | GDT_CODE | GDT_BASE(BUILD_BIOS_ADDR),
     // 16 bit data segment base=0x0 limit=0xffff (SEG32_MODE16_DS)
     GDT_LIMIT(0x0ffff) | GDT_DATA,
-    // 16 bit code segment base=0 limit=0xffffffff (SEG32_MODE16BIG_CS)
-    GDT_LIMIT(0xfffff) | GDT_CODE | GDT_G,
+    // 16 bit code segment base=0xf0000 limit=0xffffffff (SEG32_MODE16BIG_CS)
+    GDT_GRANLIMIT(0xffffffff) | GDT_CODE | GDT_BASE(BUILD_BIOS_ADDR),
     // 16 bit data segment base=0 limit=0xffffffff (SEG32_MODE16BIG_DS)
-    GDT_LIMIT(0xfffff) | GDT_DATA | GDT_G,
+    GDT_GRANLIMIT(0xffffffff) | GDT_DATA,
 };
 
 // GDT descriptor

@@ -1,6 +1,6 @@
 // Basic type definitions for X86 cpus.
 //
-// Copyright (C) 2008,2009  Kevin O'Connor <kevin@koconnor.net>
+// Copyright (C) 2008-2010  Kevin O'Connor <kevin@koconnor.net>
 //
 // This file may be distributed under the terms of the GNU LGPLv3 license.
 #ifndef __TYPES_H
@@ -17,7 +17,7 @@ typedef signed long long s64;
 typedef u32 size_t;
 
 union u64_u32_u {
-    struct { u32 hi, lo; };
+    struct { u32 lo, hi; };
     u64 val;
 };
 
@@ -33,13 +33,22 @@ union u64_u32_u {
 
 #define UNIQSEC __FILE__ "." __stringify(__LINE__)
 
+#define __noreturn __attribute__((noreturn))
+extern void __force_link_error__only_in_32bit_flat(void) __noreturn;
+extern void __force_link_error__only_in_32bit_segmented(void) __noreturn;
+extern void __force_link_error__only_in_16bit(void) __noreturn;
+
 #define __ASM(code) asm(".section .text.asm." UNIQSEC "\n\t" code)
 
 #if MODE16 == 1
 // Notes a function as externally visible in the 16bit code chunk.
 # define VISIBLE16 __VISIBLE
-// Notes a function as externally visible in the 32bit code chunk.
-# define VISIBLE32
+// Notes a function as externally visible in the 32bit flat code chunk.
+# define VISIBLE32FLAT
+// Notes a 32bit flat function that will only be called during init.
+# define VISIBLE32INIT
+// Notes a function as externally visible in the 32bit segmented code chunk.
+# define VISIBLE32SEG
 // Designate a variable as (only) visible to 16bit code.
 # define VAR16 __section(".data16." UNIQSEC)
 // Designate a variable as visible to 16bit, 32bit, and assembler code.
@@ -48,22 +57,54 @@ union u64_u32_u {
 # define VAR16EXPORT __section(".data16.export." UNIQSEC) __VISIBLE
 // Designate a variable at a specific 16bit address
 # define VAR16FIXED(addr) __aligned(1) __VISIBLE __section(".fixedaddr." __stringify(addr))
+// Designate a variable as (only) visible to 32bit segmented code.
+# define VAR32SEG __section(".discard.var32seg." UNIQSEC)
 // Designate a 32bit variable also available in 16bit "big real" mode.
-# define VAR32VISIBLE __section(".discard.var32." UNIQSEC) __VISIBLE __weak
+# define VAR32FLATVISIBLE __section(".discard.var32flat." UNIQSEC) __VISIBLE __weak
+// Designate a variable as visible and located in the e-segment.
+# define VARLOW __section(".discard.varlow." UNIQSEC) __VISIBLE __weak
 // Designate top-level assembler as 16bit only.
 # define ASM16(code) __ASM(code)
-// Designate top-level assembler as 32bit only.
-# define ASM32(code)
-#else
+// Designate top-level assembler as 32bit flat only.
+# define ASM32FLAT(code)
+// Compile time check for a given mode.
+# define ASSERT16() do { } while (0)
+# define ASSERT32SEG() __force_link_error__only_in_32bit_segmented()
+# define ASSERT32FLAT() __force_link_error__only_in_32bit_flat()
+#elif MODESEGMENT == 1
 # define VISIBLE16
-# define VISIBLE32 __VISIBLE
+# define VISIBLE32FLAT
+# define VISIBLE32INIT
+# define VISIBLE32SEG __VISIBLE
 # define VAR16 __section(".discard.var16." UNIQSEC)
 # define VAR16VISIBLE VAR16 __VISIBLE __weak
 # define VAR16EXPORT VAR16VISIBLE
 # define VAR16FIXED(addr) VAR16VISIBLE
-# define VAR32VISIBLE __VISIBLE
+# define VAR32SEG __section(".data32seg." UNIQSEC)
+# define VAR32FLATVISIBLE __section(".discard.var32flat." UNIQSEC) __VISIBLE __weak
+# define VARLOW __section(".discard.varlow." UNIQSEC) __VISIBLE __weak
 # define ASM16(code)
-# define ASM32(code) __ASM(code)
+# define ASM32FLAT(code)
+# define ASSERT16() __force_link_error__only_in_16bit()
+# define ASSERT32SEG() do { } while (0)
+# define ASSERT32FLAT() __force_link_error__only_in_32bit_flat()
+#else
+# define VISIBLE16
+# define VISIBLE32FLAT __section(".text.runtime." UNIQSEC) __VISIBLE
+# define VISIBLE32INIT __section(".text.init." UNIQSEC) __VISIBLE
+# define VISIBLE32SEG
+# define VAR16 __section(".discard.var16." UNIQSEC)
+# define VAR16VISIBLE VAR16 __VISIBLE __weak
+# define VAR16EXPORT VAR16VISIBLE
+# define VAR16FIXED(addr) VAR16VISIBLE
+# define VAR32SEG __section(".discard.var32seg." UNIQSEC)
+# define VAR32FLATVISIBLE __section(".data.runtime." UNIQSEC) __VISIBLE
+# define VARLOW __section(".datalow." UNIQSEC) __VISIBLE
+# define ASM16(code)
+# define ASM32FLAT(code) __ASM(code)
+# define ASSERT16() __force_link_error__only_in_16bit()
+# define ASSERT32SEG() __force_link_error__only_in_32bit_segmented()
+# define ASSERT32FLAT() do { } while (0)
 #endif
 
 #define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
@@ -81,6 +122,9 @@ union u64_u32_u {
         const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
         (type *)( (char *)__mptr - offsetof(type,member) );})
 
+#define likely(x)       __builtin_expect(!!(x), 1)
+#define unlikely(x)     __builtin_expect(!!(x), 0)
+
 #define NULL ((void*)0)
 
 #define __weak __attribute__((weak))
@@ -93,6 +137,8 @@ union u64_u32_u {
 
 #define noinline __attribute__((noinline))
 #define __always_inline inline __attribute__((always_inline))
+#define __malloc __attribute__((__malloc__))
+#define __attribute_const __attribute__((__const__))
 
 #define __stringify_1(x)        #x
 #define __stringify(x)          __stringify_1(x)

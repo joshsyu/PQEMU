@@ -1,15 +1,17 @@
 #ifndef __USB_UHCI_H
 #define __USB_UHCI_H
 
-#include "usb.h" // struct usb_pipe
-
 // usb-uhci.c
-struct usb_s;
-void uhci_init(void *data);
-int uhci_control(u32 endp, int dir, const void *cmd, int cmdsize
+void uhci_init(struct pci_device *pci, int busid);
+struct usbdevice_s;
+struct usb_endpoint_descriptor;
+struct usb_pipe *uhci_alloc_pipe(struct usbdevice_s *usbdev
+                                 , struct usb_endpoint_descriptor *epdesc);
+struct usb_pipe;
+int uhci_control(struct usb_pipe *p, int dir, const void *cmd, int cmdsize
                  , void *data, int datasize);
-struct usb_pipe *uhci_alloc_intr_pipe(u32 endp, int period);
-int uhci_poll_intr(struct usb_pipe *pipe, void *data);
+int uhci_send_bulk(struct usb_pipe *p, int dir, void *data, int datasize);
+int uhci_poll_intr(struct usb_pipe *p, void *data);
 
 
 /****************************************************************
@@ -88,7 +90,7 @@ struct uhci_framelist {
 #define TD_CTRL_ACTLEN_MASK     0x7FF   /* actual length, encoded as n - 1 */
 
 #define TD_CTRL_ANY_ERROR       (TD_CTRL_STALLED | TD_CTRL_DBUFERR | \
-                                 TD_CTRL_BABBLE | TD_CTRL_CRCTIME | \
+                                 TD_CTRL_BABBLE | TD_CTRL_CRCTIMEO | \
                                  TD_CTRL_BITSTUFF)
 #define uhci_maxerr(err)                ((err) << TD_CTRL_C_ERR_SHIFT)
 
@@ -110,18 +112,11 @@ struct uhci_td {
     u32 status;
     u32 token;
     void *buffer;
-
-    // Software fields
-    u32 data[4];
 } PACKED;
 
 struct uhci_qh {
     u32 link;
     u32 element;
-
-    // Software fields
-    struct uhci_td *next_td;
-    struct usb_pipe pipe;
 } PACKED;
 
 #define UHCI_PTR_BITS           0x000F

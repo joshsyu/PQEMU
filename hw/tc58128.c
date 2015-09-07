@@ -1,6 +1,5 @@
 #include "hw.h"
 #include "sh.h"
-#include "sysemu.h"
 #include "loader.h"
 
 #define CE1  0x0100
@@ -31,12 +30,8 @@ static void init_dev(tc58128_dev * dev, const char *filename)
     int ret, blocks;
 
     dev->state = WAIT;
-    dev->flash_contents = qemu_mallocz(FLASH_SIZE);
+    dev->flash_contents = g_malloc(FLASH_SIZE);
     memset(dev->flash_contents, 0xff, FLASH_SIZE);
-    if (!dev->flash_contents) {
-	fprintf(stderr, "could not alloc memory for flash\n");
-	exit(1);
-    }
     if (filename) {
 	/* Load flash image skipping the first block */
 	ret = load_image(filename, dev->flash_contents + 528 * 32);
@@ -82,7 +77,7 @@ static void handle_command(tc58128_dev * dev, uint8_t command)
 	break;
     default:
 	fprintf(stderr, "unknown flash command 0x%02x\n", command);
-	assert(0);
+        abort();
     }
 }
 
@@ -110,12 +105,12 @@ static void handle_address(tc58128_dev * dev, uint8_t data)
 	    break;
 	default:
 	    /* Invalid data */
-	    assert(0);
+            abort();
 	}
 	dev->address_cycle++;
 	break;
     default:
-	assert(0);
+        abort();
     }
 }
 
@@ -164,7 +159,7 @@ static int tc58128_cb(uint16_t porta, uint16_t portb,
 	*periph_pdtra &= 0xff00;
 	*periph_pdtra |= handle_read(&tc58128_devs[dev]);
     } else {
-	assert(0);
+        abort();
     }
     return 1;
 }

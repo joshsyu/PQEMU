@@ -5,8 +5,8 @@
 // This file may be distributed under the terms of the GNU LGPLv3 license.
 
 #include "memmap.h" // struct e820entry
+#include "config.h" // CONFIG_*
 #include "util.h" // dprintf.h
-#include "biosvar.h" // SET_EBDA
 
 
 /****************************************************************
@@ -27,7 +27,7 @@ static void
 insert_e820(int i, u64 start, u64 size, u32 type)
 {
     if (e820_count >= CONFIG_MAX_E820) {
-        dprintf(1, "Overflowed e820 list!\n");
+        warn_noalloc();
         return;
     }
 
@@ -40,19 +40,31 @@ insert_e820(int i, u64 start, u64 size, u32 type)
     e->type = type;
 }
 
+static const char *
+e820_type_name(u32 type)
+{
+    switch (type) {
+    case E820_RAM:      return "RAM";
+    case E820_RESERVED: return "RESERVED";
+    case E820_ACPI:     return "ACPI";
+    case E820_NVS:      return "NVS";
+    case E820_UNUSABLE: return "UNUSABLE";
+    case E820_HOLE:     return "HOLE";
+    default:            return "UNKNOWN";
+    }
+}
+
 // Show the current e820_list.
 static void
-dump_map()
+dump_map(void)
 {
     dprintf(1, "e820 map has %d items:\n", e820_count);
     int i;
     for (i=0; i<e820_count; i++) {
         struct e820entry *e = &e820_list[i];
         u64 e_end = e->start + e->size;
-        dprintf(1, "  %d: %08x%08x - %08x%08x = %d\n", i
-                , (u32)(e->start >> 32), (u32)e->start
-                , (u32)(e_end >> 32), (u32)e_end
-                , e->type);
+        dprintf(1, "  %d: %016llx - %016llx = %d %s\n", i
+                , e->start, e_end, e->type, e820_type_name(e->type));
     }
 }
 
@@ -119,33 +131,9 @@ add_e820(u64 start, u64 size, u32 type)
     //dump_map();
 }
 
-// Find highest area of 32bit memory that can hold the given size.
-struct e820entry *
-find_high_area(u32 size)
-{
-    int i;
-    for (i=e820_count-1; i>=0; i--) {
-        struct e820entry *e = &e820_list[i];
-        u64 end = e->start + e->size;
-        if (e->type != E820_RAM || end > 0xffffffff || e->size < size)
-            continue;
-        if (end < 1024*1024 + size)
-            break;
-        return e;
-    }
-    return NULL;
-}
-
-// Prep for memmap stuff - init bios table locations.
-void
-memmap_setup()
-{
-    e820_count = 0;
-}
-
 // Report on final memory locations.
 void
-memmap_finalize()
+memmap_finalize(void)
 {
     dump_map();
 }

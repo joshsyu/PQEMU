@@ -7,12 +7,12 @@ HXCOMM HXCOMM can be used for comments, discarded from both texi and C
 
 STEXI
 @table @option
-STEXI
+ETEXI
 
 DEF("check", img_check,
-    "check [-f fmt] filename")
+    "check [-f fmt] [-r [leaks | all]] filename")
 STEXI
-@item check [-f @var{fmt}] @var{filename}
+@item check [-f @var{fmt}] [-r [leaks | all]] @var{filename}
 ETEXI
 
 DEF("create", img_create,
@@ -22,26 +22,38 @@ STEXI
 ETEXI
 
 DEF("commit", img_commit,
-    "commit [-f fmt] filename")
+    "commit [-f fmt] [-t cache] filename")
 STEXI
-@item commit [-f @var{fmt}] @var{filename}
+@item commit [-f @var{fmt}] [-t @var{cache}] @var{filename}
 ETEXI
 
 DEF("convert", img_convert,
-    "convert [-c] [-f fmt] [-O output_fmt] [-o options] filename [filename2 [...]] output_filename")
+    "convert [-c] [-p] [-f fmt] [-t cache] [-O output_fmt] [-o options] [-s snapshot_name] [-S sparse_size] filename [filename2 [...]] output_filename")
 STEXI
-@item convert [-c] [-f @var{fmt}] [-O @var{output_fmt}] [-o @var{options}] @var{filename} [@var{filename2} [...]] @var{output_filename}
+@item convert [-c] [-p] [-f @var{fmt}] [-t @var{cache}] [-O @var{output_fmt}] [-o @var{options}] [-s @var{snapshot_name}] [-S @var{sparse_size}] @var{filename} [@var{filename2} [...]] @var{output_filename}
 ETEXI
 
 DEF("info", img_info,
-    "info [-f fmt] filename")
+    "info [-f fmt] [--output=ofmt] [--backing-chain] filename")
 STEXI
-@item info [-f @var{fmt}] @var{filename}
+@item info [-f @var{fmt}] [--output=@var{ofmt}] [--backing-chain] @var{filename}
 ETEXI
 
 DEF("snapshot", img_snapshot,
     "snapshot [-l | -a snapshot | -c snapshot | -d snapshot] filename")
 STEXI
 @item snapshot [-l | -a @var{snapshot} | -c @var{snapshot} | -d @var{snapshot}] @var{filename}
+ETEXI
+
+DEF("rebase", img_rebase,
+    "rebase [-f fmt] [-t cache] [-p] [-u] -b backing_file [-F backing_fmt] filename")
+STEXI
+@item rebase [-f @var{fmt}] [-t @var{cache}] [-p] [-u] -b @var{backing_file} [-F @var{backing_fmt}] @var{filename}
+ETEXI
+
+DEF("resize", img_resize,
+    "resize filename [+ | -]size")
+STEXI
+@item resize @var{filename} [+ | -]@var{size}
 @end table
 ETEXI

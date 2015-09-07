@@ -1,6 +1,8 @@
 /*
  * QEMU PCI VGA Emulator.
  *
+ * see docs/specs/standard-vga.txt for virtual hardware specs.
+ *
  * Copyright (c) 2003 Fabrice Bellard
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -23,16 +25,29 @@
  */
 #include "hw.h"
 #include "console.h"
-#include "pc.h"
 #include "pci.h"
 #include "vga_int.h"
 #include "pixel_ops.h"
 #include "qemu-timer.h"
 #include "loader.h"
 
+#define PCI_VGA_IOPORT_OFFSET 0x400
+#define PCI_VGA_IOPORT_SIZE   (0x3e0 - 0x3c0)
+#define PCI_VGA_BOCHS_OFFSET  0x500
+#define PCI_VGA_BOCHS_SIZE    (0x0b * 2)
+#define PCI_VGA_MMIO_SIZE     0x1000
+
+enum vga_pci_flags {
+    PCI_VGA_FLAG_ENABLE_MMIO = 1,
+};
+
 typedef struct PCIVGAState {
     PCIDevice dev;
     VGACommonState vga;
+    uint32_t flags;
+    MemoryRegion mmio;
+    MemoryRegion ioport;
+    MemoryRegion bochs;
 } PCIVGAState;
 
 static const VMStateDescription vmstate_vga_pci = {
@@ -47,99 +62,154 @@ static const VMStateDescription vmstate_vga_pci = {
     }
 };
 
-static void vga_map(PCIDevice *pci_dev, int region_num,
-                    pcibus_t addr, pcibus_t size, int type)
+static uint64_t pci_vga_ioport_read(void *ptr, hwaddr addr,
+                                    unsigned size)
 {
-    PCIVGAState *d = (PCIVGAState *)pci_dev;
-    VGACommonState *s = &d->vga;
-    if (region_num == PCI_ROM_SLOT) {
-        cpu_register_physical_memory(addr, s->bios_size, s->bios_offset);
-    } else {
-        cpu_register_physical_memory(addr, s->vram_size, s->vram_offset);
-        s->map_addr = addr;
-        s->map_end = addr + s->vram_size;
-        vga_dirty_log_start(s);
+    PCIVGAState *d = ptr;
+    uint64_t ret = 0;
+
+    switch (size) {
+    case 1:
+        ret = vga_ioport_read(&d->vga, addr);
+        break;
+    case 2:
+        ret  = vga_ioport_read(&d->vga, addr);
+        ret |= vga_ioport_read(&d->vga, addr+1) << 8;
+        break;
+    }
+    return ret;
+}
+
+static void pci_vga_ioport_write(void *ptr, hwaddr addr,
+                                 uint64_t val, unsigned size)
+{
+    PCIVGAState *d = ptr;
+
+    switch (size) {
+    case 1:
+        vga_ioport_write(&d->vga, addr + 0x3c0, val);
+        break;
+    case 2:
+        /*
+         * Update bytes in little endian order.  Allows to update
+         * indexed registers with a single word write because the
+         * index byte is updated first.
+         */
+        vga_ioport_write(&d->vga, addr + 0x3c0, val & 0xff);
+        vga_ioport_write(&d->vga, addr + 0x3c1, (val >> 8) & 0xff);
+        break;
     }
 }
 
-static void pci_vga_write_config(PCIDevice *d,
-                                 uint32_t address, uint32_t val, int len)
-{
-    PCIVGAState *pvs = container_of(d, PCIVGAState, dev);
-    VGACommonState *s = &pvs->vga;
+static const MemoryRegionOps pci_vga_ioport_ops = {
+    .read = pci_vga_ioport_read,
+    .write = pci_vga_ioport_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+    .impl.min_access_size = 1,
+    .impl.max_access_size = 2,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
 
-    pci_default_write_config(d, address, val, len);
-    if (s->map_addr && pvs->dev.io_regions[0].addr == -1)
-        s->map_addr = 0;
+static uint64_t pci_vga_bochs_read(void *ptr, hwaddr addr,
+                                   unsigned size)
+{
+    PCIVGAState *d = ptr;
+    int index = addr >> 1;
+
+    vbe_ioport_write_index(&d->vga, 0, index);
+    return vbe_ioport_read_data(&d->vga, 0);
 }
 
-static int pci_vga_initfn(PCIDevice *dev)
+static void pci_vga_bochs_write(void *ptr, hwaddr addr,
+                                uint64_t val, unsigned size)
 {
-     PCIVGAState *d = DO_UPCAST(PCIVGAState, dev, dev);
-     VGACommonState *s = &d->vga;
-     uint8_t *pci_conf = d->dev.config;
+    PCIVGAState *d = ptr;
+    int index = addr >> 1;
 
-     // vga + console init
-     vga_common_init(s, VGA_RAM_SIZE);
-     vga_init(s);
-
-     s->ds = graphic_console_init(s->update, s->invalidate,
-                                  s->screen_dump, s->text_update, s);
-
-     // dummy VGA (same as Bochs ID)
-     pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_QEMU);
-     pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_QEMU_VGA);
-     pci_config_set_class(pci_conf, PCI_CLASS_DISPLAY_VGA);
-     pci_conf[PCI_HEADER_TYPE] = PCI_HEADER_TYPE_NORMAL; // header_type
-
-     /* XXX: VGA_RAM_SIZE must be a power of two */
-     pci_register_bar(&d->dev, 0, VGA_RAM_SIZE,
-                      PCI_BASE_ADDRESS_MEM_PREFETCH, vga_map);
-
-     if (s->bios_size) {
-        unsigned int bios_total_size;
-        /* must be a power of two */
-        bios_total_size = 1;
-        while (bios_total_size < s->bios_size)
-            bios_total_size <<= 1;
-        pci_register_bar(&d->dev, PCI_ROM_SLOT, bios_total_size,
-                         PCI_BASE_ADDRESS_MEM_PREFETCH, vga_map);
-     }
-
-    vga_init_vbe(s);
-     /* ROM BIOS */
-     rom_add_vga(VGABIOS_FILENAME);
-     return 0;
+    vbe_ioport_write_index(&d->vga, 0, index);
+    vbe_ioport_write_data(&d->vga, 0, val);
 }
 
-int pci_vga_init(PCIBus *bus,
-                 unsigned long vga_bios_offset, int vga_bios_size)
-{
-    PCIDevice *dev;
+static const MemoryRegionOps pci_vga_bochs_ops = {
+    .read = pci_vga_bochs_read,
+    .write = pci_vga_bochs_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+    .impl.min_access_size = 2,
+    .impl.max_access_size = 2,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
 
-    dev = pci_create(bus, -1, "VGA");
-    qdev_prop_set_uint32(&dev->qdev, "bios-offset", vga_bios_offset);
-    qdev_prop_set_uint32(&dev->qdev, "bios-size", vga_bios_size);
-    qdev_init_nofail(&dev->qdev);
+static int pci_std_vga_initfn(PCIDevice *dev)
+{
+    PCIVGAState *d = DO_UPCAST(PCIVGAState, dev, dev);
+    VGACommonState *s = &d->vga;
+
+    /* vga + console init */
+    vga_common_init(s);
+    vga_init(s, pci_address_space(dev), pci_address_space_io(dev), true);
+
+    s->ds = graphic_console_init(s->update, s->invalidate,
+                                 s->screen_dump, s->text_update, s);
+
+    /* XXX: VGA_RAM_SIZE must be a power of two */
+    pci_register_bar(&d->dev, 0, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->vram);
+
+    /* mmio bar for vga register access */
+    if (d->flags & (1 << PCI_VGA_FLAG_ENABLE_MMIO)) {
+        memory_region_init(&d->mmio, "vga.mmio", 4096);
+        memory_region_init_io(&d->ioport, &pci_vga_ioport_ops, d,
+                              "vga ioports remapped", PCI_VGA_IOPORT_SIZE);
+        memory_region_init_io(&d->bochs, &pci_vga_bochs_ops, d,
+                              "bochs dispi interface", PCI_VGA_BOCHS_SIZE);
+
+        memory_region_add_subregion(&d->mmio, PCI_VGA_IOPORT_OFFSET,
+                                    &d->ioport);
+        memory_region_add_subregion(&d->mmio, PCI_VGA_BOCHS_OFFSET,
+                                    &d->bochs);
+        pci_register_bar(&d->dev, 2, PCI_BASE_ADDRESS_SPACE_MEMORY, &d->mmio);
+    }
+
+    if (!dev->rom_bar) {
+        /* compatibility with pc-0.13 and older */
+        vga_init_vbe(s, pci_address_space(dev));
+    }
 
     return 0;
 }
 
-static PCIDeviceInfo vga_info = {
-    .qdev.name    = "VGA",
-    .qdev.size    = sizeof(PCIVGAState),
-    .qdev.vmsd    = &vmstate_vga_pci,
-    .init         = pci_vga_initfn,
-    .config_write = pci_vga_write_config,
-    .qdev.props   = (Property[]) {
-        DEFINE_PROP_HEX32("bios-offset", PCIVGAState, vga.bios_offset, 0),
-        DEFINE_PROP_HEX32("bios-size",   PCIVGAState, vga.bios_size,   0),
-        DEFINE_PROP_END_OF_LIST(),
-    }
+static Property vga_pci_properties[] = {
+    DEFINE_PROP_UINT32("vgamem_mb", PCIVGAState, vga.vram_size_mb, 16),
+    DEFINE_PROP_BIT("mmio", PCIVGAState, flags, PCI_VGA_FLAG_ENABLE_MMIO, true),
+    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void vga_register(void)
+static void vga_class_init(ObjectClass *klass, void *data)
 {
-    pci_qdev_register(&vga_info);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+
+    k->no_hotplug = 1;
+    k->init = pci_std_vga_initfn;
+    k->romfile = "vgabios-stdvga.bin";
+    k->vendor_id = PCI_VENDOR_ID_QEMU;
+    k->device_id = PCI_DEVICE_ID_QEMU_VGA;
+    k->class_id = PCI_CLASS_DISPLAY_VGA;
+    dc->vmsd = &vmstate_vga_pci;
+    dc->props = vga_pci_properties;
 }
-device_init(vga_register);
+
+static TypeInfo vga_info = {
+    .name          = "VGA",
+    .parent        = TYPE_PCI_DEVICE,
+    .instance_size = sizeof(PCIVGAState),
+    .class_init    = vga_class_init,
+};
+
+static void vga_register_types(void)
+{
+    type_register_static(&vga_info);
+}
+
+type_init(vga_register_types)

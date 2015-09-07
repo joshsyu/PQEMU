@@ -1,14 +1,15 @@
 /*
- * QInt data type.
+ * QInt Module
  *
  * Copyright (C) 2009 Red Hat Inc.
  *
  * Authors:
  *  Luiz Capitulino <lcapitulino@redhat.com>
  *
- * This work is licensed under the terms of the GNU GPL, version 2.  See
- * the COPYING file in the top-level directory.
+ * This work is licensed under the terms of the GNU LGPL, version 2.1 or later.
+ * See the COPYING.LIB file in the top-level directory.
  */
+
 #include "qint.h"
 #include "qobject.h"
 #include "qemu-common.h"
@@ -29,7 +30,7 @@ QInt *qint_from_int(int64_t value)
 {
     QInt *qi;
 
-    qi = qemu_malloc(sizeof(*qi));
+    qi = g_malloc(sizeof(*qi));
     qi->value = value;
     QOBJECT_INIT(qi, &qint_type);
 
@@ -62,5 +63,5 @@ QInt *qobject_to_qint(const QObject *obj)
 static void qint_destroy_obj(QObject *obj)
 {
     assert(obj != NULL);
-    qemu_free(qobject_to_qint(obj));
+    g_free(qobject_to_qint(obj));
 }

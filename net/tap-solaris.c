@@ -23,6 +23,7 @@
  */
 
 #include "net/tap.h"
+#include "sysemu.h"
 
 #include <sys/stat.h>
 #include <sys/ethernet.h>
@@ -37,6 +38,7 @@
 #include <net/if.h>
 #include <syslog.h>
 #include <stropts.h>
+#include "qemu-error.h"
 
 ssize_t tap_read_packet(int tapfd, uint8_t *buf, int maxlen)
 {
@@ -63,7 +65,7 @@ static int tap_alloc(char *dev, size_t dev_size)
     static int arp_fd = 0;
     int ip_muxid, arp_muxid;
     struct strioctl  strioc_if, strioc_ppa;
-    int link_type = I_PLINK;;
+    int link_type = I_PLINK;
     struct lifreq ifr;
     char actual_name[32] = "";
 
@@ -185,8 +187,8 @@ int tap_open(char *ifname, int ifname_size, int *vnet_hdr, int vnet_hdr_required
         *vnet_hdr = 0;
 
         if (vnet_hdr_required && !*vnet_hdr) {
-            qemu_error("vnet_hdr=1 requested, but no kernel "
-                       "support for IFF_VNET_HDR available");
+            error_report("vnet_hdr=1 requested, but no kernel "
+                         "support for IFF_VNET_HDR available");
             close(fd);
             return -1;
         }
@@ -195,7 +197,7 @@ int tap_open(char *ifname, int ifname_size, int *vnet_hdr, int vnet_hdr_required
     return fd;
 }
 
-int tap_set_sndbuf(int fd, QemuOpts *opts)
+int tap_set_sndbuf(int fd, const NetdevTapOptions *tap)
 {
     return 0;
 }
@@ -208,6 +210,15 @@ int tap_probe_vnet_hdr(int fd)
 int tap_probe_has_ufo(int fd)
 {
     return 0;
+}
+
+int tap_probe_vnet_hdr_len(int fd, int len)
+{
+    return 0;
+}
+
+void tap_fd_set_vnet_hdr_len(int fd, int len)
+{
 }
 
 void tap_fd_set_offload(int fd, int csum, int tso4,

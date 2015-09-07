@@ -62,27 +62,25 @@ static struct elf_shdr *glue(find_section, SZ)(struct elf_shdr *shdr_table,
 
 static int glue(symfind, SZ)(const void *s0, const void *s1)
 {
-    struct elf_sym *key = (struct elf_sym *)s0;
+    hwaddr addr = *(hwaddr *)s0;
     struct elf_sym *sym = (struct elf_sym *)s1;
     int result = 0;
-    if (key->st_value < sym->st_value) {
+    if (addr < sym->st_value) {
         result = -1;
-    } else if (key->st_value >= sym->st_value + sym->st_size) {
+    } else if (addr >= sym->st_value + sym->st_size) {
         result = 1;
     }
     return result;
 }
 
 static const char *glue(lookup_symbol, SZ)(struct syminfo *s,
-                                           target_phys_addr_t orig_addr)
+                                           hwaddr orig_addr)
 {
     struct elf_sym *syms = glue(s->disas_symtab.elf, SZ);
-    struct elf_sym key;
     struct elf_sym *sym;
 
-    key.st_value = orig_addr;
-
-    sym = bsearch(&key, syms, s->disas_num_syms, sizeof(*syms), glue(symfind, SZ));
+    sym = bsearch(&orig_addr, syms, s->disas_num_syms, sizeof(*syms),
+                  glue(symfind, SZ));
     if (sym != NULL) {
         return s->disas_strtab + sym->st_name;
     }
@@ -149,9 +147,19 @@ static int glue(load_symbols, SZ)(struct elfhdr *ehdr, int fd, int must_swab,
         }
         i++;
     }
-    syms = qemu_realloc(syms, nsyms * sizeof(*syms));
+    if (nsyms) {
+        syms = g_realloc(syms, nsyms * sizeof(*syms));
 
-    qsort(syms, nsyms, sizeof(*syms), glue(symcmp, SZ));
+        qsort(syms, nsyms, sizeof(*syms), glue(symcmp, SZ));
+        for (i = 0; i < nsyms - 1; i++) {
+            if (syms[i].st_size == 0) {
+                syms[i].st_size = syms[i + 1].st_value - syms[i].st_value;
+            }
+        }
+    } else {
+        g_free(syms);
+        syms = NULL;
+    }
 
     /* String table */
     if (symtab->sh_link >= ehdr->e_shnum)
@@ -163,23 +171,25 @@ static int glue(load_symbols, SZ)(struct elfhdr *ehdr, int fd, int must_swab,
         goto fail;
 
     /* Commit */
-    s = qemu_mallocz(sizeof(*s));
+    s = g_malloc0(sizeof(*s));
     s->lookup_symbol = glue(lookup_symbol, SZ);
     glue(s->disas_symtab.elf, SZ) = syms;
     s->disas_num_syms = nsyms;
     s->disas_strtab = str;
     s->next = syminfos;
     syminfos = s;
-    qemu_free(shdr_table);
+    g_free(shdr_table);
     return 0;
  fail:
-    qemu_free(syms);
-    qemu_free(str);
-    qemu_free(shdr_table);
+    g_free(syms);
+    g_free(str);
+    g_free(shdr_table);
     return -1;
 }
 
-static int glue(load_elf, SZ)(const char *name, int fd, int64_t address_offset,
+static int glue(load_elf, SZ)(const char *name, int fd,
+                              uint64_t (*translate_fn)(void *, uint64_t),
+                              void *translate_opaque,
                               int must_swab, uint64_t *pentry,
                               uint64_t *lowaddr, uint64_t *highaddr,
                               int elf_machine, int clear_lsb)
@@ -209,6 +219,11 @@ static int glue(load_elf, SZ)(const char *name, int fd, int64_t address_offset,
                 if (EM_386 != ehdr.e_machine)
                     goto fail;
             break;
+        case EM_MICROBLAZE:
+            if (EM_MICROBLAZE != ehdr.e_machine)
+                if (EM_MICROBLAZE_OLD != ehdr.e_machine)
+                    goto fail;
+            break;
         default:
             if (elf_machine != ehdr.e_machine)
                 goto fail;
@@ -221,7 +236,7 @@ static int glue(load_elf, SZ)(const char *name, int fd, int64_t address_offset,
 
     size = ehdr.e_phnum * sizeof(phdr[0]);
     lseek(fd, ehdr.e_phoff, SEEK_SET);
-    phdr = qemu_mallocz(size);
+    phdr = g_malloc0(size);
     if (!phdr)
         goto fail;
     if (read(fd, phdr, size) != size)
@@ -239,7 +254,7 @@ static int glue(load_elf, SZ)(const char *name, int fd, int64_t address_offset,
         if (ph->p_type == PT_LOAD) {
             mem_size = ph->p_memsz;
             /* XXX: avoid allocating */
-            data = qemu_mallocz(mem_size);
+            data = g_malloc0(mem_size);
             if (ph->p_filesz > 0) {
                 if (lseek(fd, ph->p_offset, SEEK_SET) < 0)
                     goto fail;
@@ -248,7 +263,22 @@ static int glue(load_elf, SZ)(const char *name, int fd, int64_t address_offset,
             }
             /* address_offset is hack for kernel images that are
                linked at the wrong physical address.  */
-            addr = ph->p_paddr + address_offset;
+            if (translate_fn) {
+                addr = translate_fn(translate_opaque, ph->p_paddr);
+            } else {
+                addr = ph->p_paddr;
+            }
+
+            /* the entry pointer in the ELF header is a virtual
+             * address, if the text segments paddr and vaddr differ
+             * we need to adjust the entry */
+            if (pentry && !translate_fn &&
+                    ph->p_vaddr != ph->p_paddr &&
+                    ehdr.e_entry >= ph->p_vaddr &&
+                    ehdr.e_entry < ph->p_vaddr + ph->p_filesz &&
+                    ph->p_flags & PF_X) {
+                *pentry = ehdr.e_entry - ph->p_vaddr + ph->p_paddr;
+            }
 
             snprintf(label, sizeof(label), "phdr #%d: %s", i, name);
             rom_add_blob_fixed(label, data, mem_size, addr);
@@ -259,18 +289,18 @@ static int glue(load_elf, SZ)(const char *name, int fd, int64_t address_offset,
             if ((addr + mem_size) > high)
                 high = addr + mem_size;
 
-            qemu_free(data);
+            g_free(data);
             data = NULL;
         }
     }
-    qemu_free(phdr);
+    g_free(phdr);
     if (lowaddr)
         *lowaddr = (uint64_t)(elf_sword)low;
     if (highaddr)
         *highaddr = (uint64_t)(elf_sword)high;
     return total_size;
  fail:
-    qemu_free(data);
-    qemu_free(phdr);
+    g_free(data);
+    g_free(phdr);
     return -1;
 }

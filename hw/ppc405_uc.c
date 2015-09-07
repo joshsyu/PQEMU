@@ -24,10 +24,11 @@
 #include "hw.h"
 #include "ppc.h"
 #include "ppc405.h"
-#include "pc.h"
+#include "serial.h"
 #include "qemu-timer.h"
 #include "sysemu.h"
 #include "qemu-log.h"
+#include "exec-memory.h"
 
 #define DEBUG_OPBA
 #define DEBUG_SDRAM
@@ -40,7 +41,7 @@
 #define DEBUG_CLOCKS
 //#define DEBUG_CLOCKS_LL
 
-ram_addr_t ppc405_set_bootinfo (CPUState *env, ppc4xx_bd_info_t *bd,
+ram_addr_t ppc405_set_bootinfo (CPUPPCState *env, ppc4xx_bd_info_t *bd,
                                 uint32_t flags)
 {
     ram_addr_t bdloc;
@@ -51,38 +52,42 @@ ram_addr_t ppc405_set_bootinfo (CPUState *env, ppc4xx_bd_info_t *bd,
         bdloc = 0x01000000UL - sizeof(struct ppc4xx_bd_info_t);
     else
         bdloc = bd->bi_memsize - sizeof(struct ppc4xx_bd_info_t);
-    stl_phys(bdloc + 0x00, bd->bi_memstart);
-    stl_phys(bdloc + 0x04, bd->bi_memsize);
-    stl_phys(bdloc + 0x08, bd->bi_flashstart);
-    stl_phys(bdloc + 0x0C, bd->bi_flashsize);
-    stl_phys(bdloc + 0x10, bd->bi_flashoffset);
-    stl_phys(bdloc + 0x14, bd->bi_sramstart);
-    stl_phys(bdloc + 0x18, bd->bi_sramsize);
-    stl_phys(bdloc + 0x1C, bd->bi_bootflags);
-    stl_phys(bdloc + 0x20, bd->bi_ipaddr);
-    for (i = 0; i < 6; i++)
+    stl_be_phys(bdloc + 0x00, bd->bi_memstart);
+    stl_be_phys(bdloc + 0x04, bd->bi_memsize);
+    stl_be_phys(bdloc + 0x08, bd->bi_flashstart);
+    stl_be_phys(bdloc + 0x0C, bd->bi_flashsize);
+    stl_be_phys(bdloc + 0x10, bd->bi_flashoffset);
+    stl_be_phys(bdloc + 0x14, bd->bi_sramstart);
+    stl_be_phys(bdloc + 0x18, bd->bi_sramsize);
+    stl_be_phys(bdloc + 0x1C, bd->bi_bootflags);
+    stl_be_phys(bdloc + 0x20, bd->bi_ipaddr);
+    for (i = 0; i < 6; i++) {
         stb_phys(bdloc + 0x24 + i, bd->bi_enetaddr[i]);
-    stw_phys(bdloc + 0x2A, bd->bi_ethspeed);
-    stl_phys(bdloc + 0x2C, bd->bi_intfreq);
-    stl_phys(bdloc + 0x30, bd->bi_busfreq);
-    stl_phys(bdloc + 0x34, bd->bi_baudrate);
-    for (i = 0; i < 4; i++)
+    }
+    stw_be_phys(bdloc + 0x2A, bd->bi_ethspeed);
+    stl_be_phys(bdloc + 0x2C, bd->bi_intfreq);
+    stl_be_phys(bdloc + 0x30, bd->bi_busfreq);
+    stl_be_phys(bdloc + 0x34, bd->bi_baudrate);
+    for (i = 0; i < 4; i++) {
         stb_phys(bdloc + 0x38 + i, bd->bi_s_version[i]);
-    for (i = 0; i < 32; i++)
-        stb_phys(bdloc + 0x3C + i, bd->bi_s_version[i]);
-    stl_phys(bdloc + 0x5C, bd->bi_plb_busfreq);
-    stl_phys(bdloc + 0x60, bd->bi_pci_busfreq);
-    for (i = 0; i < 6; i++)
+    }
+    for (i = 0; i < 32; i++) {
+        stb_phys(bdloc + 0x3C + i, bd->bi_r_version[i]);
+    }
+    stl_be_phys(bdloc + 0x5C, bd->bi_plb_busfreq);
+    stl_be_phys(bdloc + 0x60, bd->bi_pci_busfreq);
+    for (i = 0; i < 6; i++) {
         stb_phys(bdloc + 0x64 + i, bd->bi_pci_enetaddr[i]);
+    }
     n = 0x6A;
     if (flags & 0x00000001) {
         for (i = 0; i < 6; i++)
             stb_phys(bdloc + n++, bd->bi_pci_enetaddr2[i]);
     }
-    stl_phys(bdloc + n, bd->bi_opbfreq);
+    stl_be_phys(bdloc + n, bd->bi_opbfreq);
     n += 4;
     for (i = 0; i < 2; i++) {
-        stl_phys(bdloc + n, bd->bi_iic_fast[i]);
+        stl_be_phys(bdloc + n, bd->bi_iic_fast[i]);
         n += 4;
     }
 
@@ -107,10 +112,10 @@ struct ppc4xx_plb_t {
     uint32_t besr;
 };
 
-static target_ulong dcr_read_plb (void *opaque, int dcrn)
+static uint32_t dcr_read_plb (void *opaque, int dcrn)
 {
     ppc4xx_plb_t *plb;
-    target_ulong ret;
+    uint32_t ret;
 
     plb = opaque;
     switch (dcrn) {
@@ -132,7 +137,7 @@ static target_ulong dcr_read_plb (void *opaque, int dcrn)
     return ret;
 }
 
-static void dcr_write_plb (void *opaque, int dcrn, target_ulong val)
+static void dcr_write_plb (void *opaque, int dcrn, uint32_t val)
 {
     ppc4xx_plb_t *plb;
 
@@ -164,11 +169,11 @@ static void ppc4xx_plb_reset (void *opaque)
     plb->besr = 0x00000000;
 }
 
-static void ppc4xx_plb_init(CPUState *env)
+static void ppc4xx_plb_init(CPUPPCState *env)
 {
     ppc4xx_plb_t *plb;
 
-    plb = qemu_mallocz(sizeof(ppc4xx_plb_t));
+    plb = g_malloc0(sizeof(ppc4xx_plb_t));
     ppc_dcr_register(env, PLB0_ACR, plb, &dcr_read_plb, &dcr_write_plb);
     ppc_dcr_register(env, PLB0_BEAR, plb, &dcr_read_plb, &dcr_write_plb);
     ppc_dcr_register(env, PLB0_BESR, plb, &dcr_read_plb, &dcr_write_plb);
@@ -186,13 +191,14 @@ enum {
 typedef struct ppc4xx_pob_t ppc4xx_pob_t;
 struct ppc4xx_pob_t {
     uint32_t bear;
-    uint32_t besr[2];
+    uint32_t besr0;
+    uint32_t besr1;
 };
 
-static target_ulong dcr_read_pob (void *opaque, int dcrn)
+static uint32_t dcr_read_pob (void *opaque, int dcrn)
 {
     ppc4xx_pob_t *pob;
-    target_ulong ret;
+    uint32_t ret;
 
     pob = opaque;
     switch (dcrn) {
@@ -200,8 +206,10 @@ static target_ulong dcr_read_pob (void *opaque, int dcrn)
         ret = pob->bear;
         break;
     case POB0_BESR0:
+        ret = pob->besr0;
+        break;
     case POB0_BESR1:
-        ret = pob->besr[dcrn - POB0_BESR0];
+        ret = pob->besr1;
         break;
     default:
         /* Avoid gcc warning */
@@ -212,7 +220,7 @@ static target_ulong dcr_read_pob (void *opaque, int dcrn)
     return ret;
 }
 
-static void dcr_write_pob (void *opaque, int dcrn, target_ulong val)
+static void dcr_write_pob (void *opaque, int dcrn, uint32_t val)
 {
     ppc4xx_pob_t *pob;
 
@@ -222,9 +230,12 @@ static void dcr_write_pob (void *opaque, int dcrn, target_ulong val)
         /* Read only */
         break;
     case POB0_BESR0:
+        /* Write-clear */
+        pob->besr0 &= ~val;
+        break;
     case POB0_BESR1:
         /* Write-clear */
-        pob->besr[dcrn - POB0_BESR0] &= ~val;
+        pob->besr1 &= ~val;
         break;
     }
 }
@@ -236,15 +247,15 @@ static void ppc4xx_pob_reset (void *opaque)
     pob = opaque;
     /* No error */
     pob->bear = 0x00000000;
-    pob->besr[0] = 0x0000000;
-    pob->besr[1] = 0x0000000;
+    pob->besr0 = 0x0000000;
+    pob->besr1 = 0x0000000;
 }
 
-static void ppc4xx_pob_init(CPUState *env)
+static void ppc4xx_pob_init(CPUPPCState *env)
 {
     ppc4xx_pob_t *pob;
 
-    pob = qemu_mallocz(sizeof(ppc4xx_pob_t));
+    pob = g_malloc0(sizeof(ppc4xx_pob_t));
     ppc_dcr_register(env, POB0_BEAR, pob, &dcr_read_pob, &dcr_write_pob);
     ppc_dcr_register(env, POB0_BESR0, pob, &dcr_read_pob, &dcr_write_pob);
     ppc_dcr_register(env, POB0_BESR1, pob, &dcr_read_pob, &dcr_write_pob);
@@ -255,11 +266,12 @@ static void ppc4xx_pob_init(CPUState *env)
 /* OPB arbitrer */
 typedef struct ppc4xx_opba_t ppc4xx_opba_t;
 struct ppc4xx_opba_t {
+    MemoryRegion io;
     uint8_t cr;
     uint8_t pr;
 };
 
-static uint32_t opba_readb (void *opaque, target_phys_addr_t addr)
+static uint32_t opba_readb (void *opaque, hwaddr addr)
 {
     ppc4xx_opba_t *opba;
     uint32_t ret;
@@ -284,7 +296,7 @@ static uint32_t opba_readb (void *opaque, target_phys_addr_t addr)
 }
 
 static void opba_writeb (void *opaque,
-                         target_phys_addr_t addr, uint32_t value)
+                         hwaddr addr, uint32_t value)
 {
     ppc4xx_opba_t *opba;
 
@@ -305,7 +317,7 @@ static void opba_writeb (void *opaque,
     }
 }
 
-static uint32_t opba_readw (void *opaque, target_phys_addr_t addr)
+static uint32_t opba_readw (void *opaque, hwaddr addr)
 {
     uint32_t ret;
 
@@ -319,7 +331,7 @@ static uint32_t opba_readw (void *opaque, target_phys_addr_t addr)
 }
 
 static void opba_writew (void *opaque,
-                         target_phys_addr_t addr, uint32_t value)
+                         hwaddr addr, uint32_t value)
 {
 #ifdef DEBUG_OPBA
     printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
@@ -329,7 +341,7 @@ static void opba_writew (void *opaque,
     opba_writeb(opaque, addr + 1, value);
 }
 
-static uint32_t opba_readl (void *opaque, target_phys_addr_t addr)
+static uint32_t opba_readl (void *opaque, hwaddr addr)
 {
     uint32_t ret;
 
@@ -343,7 +355,7 @@ static uint32_t opba_readl (void *opaque, target_phys_addr_t addr)
 }
 
 static void opba_writel (void *opaque,
-                         target_phys_addr_t addr, uint32_t value)
+                         hwaddr addr, uint32_t value)
 {
 #ifdef DEBUG_OPBA
     printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
@@ -353,16 +365,12 @@ static void opba_writel (void *opaque,
     opba_writeb(opaque, addr + 1, value >> 16);
 }
 
-static CPUReadMemoryFunc * const opba_read[] = {
-    &opba_readb,
-    &opba_readw,
-    &opba_readl,
-};
-
-static CPUWriteMemoryFunc * const opba_write[] = {
-    &opba_writeb,
-    &opba_writew,
-    &opba_writel,
+static const MemoryRegionOps opba_ops = {
+    .old_mmio = {
+        .read = { opba_readb, opba_readw, opba_readl, },
+        .write = { opba_writeb, opba_writew, opba_writel, },
+    },
+    .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
 static void ppc4xx_opba_reset (void *opaque)
@@ -374,17 +382,16 @@ static void ppc4xx_opba_reset (void *opaque)
     opba->pr = 0x11;
 }
 
-static void ppc4xx_opba_init(target_phys_addr_t base)
+static void ppc4xx_opba_init(hwaddr base)
 {
     ppc4xx_opba_t *opba;
-    int io;
 
-    opba = qemu_mallocz(sizeof(ppc4xx_opba_t));
+    opba = g_malloc0(sizeof(ppc4xx_opba_t));
 #ifdef DEBUG_OPBA
     printf("%s: offset " TARGET_FMT_plx "\n", __func__, base);
 #endif
-    io = cpu_register_io_memory(opba_read, opba_write, opba);
-    cpu_register_physical_memory(base, 0x002, io);
+    memory_region_init_io(&opba->io, &opba_ops, opba, "opba", 0x002);
+    memory_region_add_subregion(get_system_memory(), base, &opba->io);
     qemu_register_reset(ppc4xx_opba_reset, opba);
 }
 
@@ -410,10 +417,10 @@ enum {
     EBC0_CFGDATA = 0x013,
 };
 
-static target_ulong dcr_read_ebc (void *opaque, int dcrn)
+static uint32_t dcr_read_ebc (void *opaque, int dcrn)
 {
     ppc4xx_ebc_t *ebc;
-    target_ulong ret;
+    uint32_t ret;
 
     ebc = opaque;
     switch (dcrn) {
@@ -486,6 +493,7 @@ static target_ulong dcr_read_ebc (void *opaque, int dcrn)
             ret = 0x00000000;
             break;
         }
+        break;
     default:
         ret = 0x00000000;
         break;
@@ -494,7 +502,7 @@ static target_ulong dcr_read_ebc (void *opaque, int dcrn)
     return ret;
 }
 
-static void dcr_write_ebc (void *opaque, int dcrn, target_ulong val)
+static void dcr_write_ebc (void *opaque, int dcrn, uint32_t val)
 {
     ppc4xx_ebc_t *ebc;
 
@@ -572,11 +580,11 @@ static void ebc_reset (void *opaque)
     ebc->cfg = 0x80400000;
 }
 
-static void ppc405_ebc_init(CPUState *env)
+static void ppc405_ebc_init(CPUPPCState *env)
 {
     ppc4xx_ebc_t *ebc;
 
-    ebc = qemu_mallocz(sizeof(ppc4xx_ebc_t));
+    ebc = g_malloc0(sizeof(ppc4xx_ebc_t));
     qemu_register_reset(&ebc_reset, ebc);
     ppc_dcr_register(env, EBC0_CFGADDR,
                      ebc, &dcr_read_ebc, &dcr_write_ebc);
@@ -627,20 +635,13 @@ struct ppc405_dma_t {
     uint32_t pol;
 };
 
-static target_ulong dcr_read_dma (void *opaque, int dcrn)
+static uint32_t dcr_read_dma (void *opaque, int dcrn)
 {
-    ppc405_dma_t *dma;
-
-    dma = opaque;
-
     return 0;
 }
 
-static void dcr_write_dma (void *opaque, int dcrn, target_ulong val)
+static void dcr_write_dma (void *opaque, int dcrn, uint32_t val)
 {
-    ppc405_dma_t *dma;
-
-    dma = opaque;
 }
 
 static void ppc405_dma_reset (void *opaque)
@@ -662,11 +663,11 @@ static void ppc405_dma_reset (void *opaque)
     dma->pol = 0x00000000;
 }
 
-static void ppc405_dma_init(CPUState *env, qemu_irq irqs[4])
+static void ppc405_dma_init(CPUPPCState *env, qemu_irq irqs[4])
 {
     ppc405_dma_t *dma;
 
-    dma = qemu_mallocz(sizeof(ppc405_dma_t));
+    dma = g_malloc0(sizeof(ppc405_dma_t));
     memcpy(dma->irqs, irqs, 4 * sizeof(qemu_irq));
     qemu_register_reset(&ppc405_dma_reset, dma);
     ppc_dcr_register(env, DMA0_CR0,
@@ -723,6 +724,7 @@ static void ppc405_dma_init(CPUState *env, qemu_irq irqs[4])
 /* GPIO */
 typedef struct ppc405_gpio_t ppc405_gpio_t;
 struct ppc405_gpio_t {
+    MemoryRegion io;
     uint32_t or;
     uint32_t tcr;
     uint32_t osrh;
@@ -736,11 +738,8 @@ struct ppc405_gpio_t {
     uint32_t isr1l;
 };
 
-static uint32_t ppc405_gpio_readb (void *opaque, target_phys_addr_t addr)
+static uint32_t ppc405_gpio_readb (void *opaque, hwaddr addr)
 {
-    ppc405_gpio_t *gpio;
-
-    gpio = opaque;
 #ifdef DEBUG_GPIO
     printf("%s: addr " TARGET_FMT_plx "\n", __func__, addr);
 #endif
@@ -749,22 +748,16 @@ static uint32_t ppc405_gpio_readb (void *opaque, target_phys_addr_t addr)
 }
 
 static void ppc405_gpio_writeb (void *opaque,
-                                target_phys_addr_t addr, uint32_t value)
+                                hwaddr addr, uint32_t value)
 {
-    ppc405_gpio_t *gpio;
-
-    gpio = opaque;
 #ifdef DEBUG_GPIO
     printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
            value);
 #endif
 }
 
-static uint32_t ppc405_gpio_readw (void *opaque, target_phys_addr_t addr)
+static uint32_t ppc405_gpio_readw (void *opaque, hwaddr addr)
 {
-    ppc405_gpio_t *gpio;
-
-    gpio = opaque;
 #ifdef DEBUG_GPIO
     printf("%s: addr " TARGET_FMT_plx "\n", __func__, addr);
 #endif
@@ -773,22 +766,16 @@ static uint32_t ppc405_gpio_readw (void *opaque, target_phys_addr_t addr)
 }
 
 static void ppc405_gpio_writew (void *opaque,
-                                target_phys_addr_t addr, uint32_t value)
+                                hwaddr addr, uint32_t value)
 {
-    ppc405_gpio_t *gpio;
-
-    gpio = opaque;
 #ifdef DEBUG_GPIO
     printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
            value);
 #endif
 }
 
-static uint32_t ppc405_gpio_readl (void *opaque, target_phys_addr_t addr)
+static uint32_t ppc405_gpio_readl (void *opaque, hwaddr addr)
 {
-    ppc405_gpio_t *gpio;
-
-    gpio = opaque;
 #ifdef DEBUG_GPIO
     printf("%s: addr " TARGET_FMT_plx "\n", __func__, addr);
 #endif
@@ -797,47 +784,36 @@ static uint32_t ppc405_gpio_readl (void *opaque, target_phys_addr_t addr)
 }
 
 static void ppc405_gpio_writel (void *opaque,
-                                target_phys_addr_t addr, uint32_t value)
+                                hwaddr addr, uint32_t value)
 {
-    ppc405_gpio_t *gpio;
-
-    gpio = opaque;
 #ifdef DEBUG_GPIO
     printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
            value);
 #endif
 }
 
-static CPUReadMemoryFunc * const ppc405_gpio_read[] = {
-    &ppc405_gpio_readb,
-    &ppc405_gpio_readw,
-    &ppc405_gpio_readl,
-};
-
-static CPUWriteMemoryFunc * const ppc405_gpio_write[] = {
-    &ppc405_gpio_writeb,
-    &ppc405_gpio_writew,
-    &ppc405_gpio_writel,
+static const MemoryRegionOps ppc405_gpio_ops = {
+    .old_mmio = {
+        .read = { ppc405_gpio_readb, ppc405_gpio_readw, ppc405_gpio_readl, },
+        .write = { ppc405_gpio_writeb, ppc405_gpio_writew, ppc405_gpio_writel, },
+    },
+    .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
 static void ppc405_gpio_reset (void *opaque)
 {
-    ppc405_gpio_t *gpio;
-
-    gpio = opaque;
 }
 
-static void ppc405_gpio_init(target_phys_addr_t base)
+static void ppc405_gpio_init(hwaddr base)
 {
     ppc405_gpio_t *gpio;
-    int io;
 
-    gpio = qemu_mallocz(sizeof(ppc405_gpio_t));
+    gpio = g_malloc0(sizeof(ppc405_gpio_t));
 #ifdef DEBUG_GPIO
     printf("%s: offset " TARGET_FMT_plx "\n", __func__, base);
 #endif
-    io = cpu_register_io_memory(ppc405_gpio_read, ppc405_gpio_write, gpio);
-    cpu_register_physical_memory(base, 0x038, io);
+    memory_region_init_io(&gpio->io, &ppc405_gpio_ops, gpio, "pgio", 0x038);
+    memory_region_add_subregion(get_system_memory(), base, &gpio->io);
     qemu_register_reset(&ppc405_gpio_reset, gpio);
 }
 
@@ -852,7 +828,9 @@ enum {
 
 typedef struct ppc405_ocm_t ppc405_ocm_t;
 struct ppc405_ocm_t {
-    target_ulong offset;
+    MemoryRegion ram;
+    MemoryRegion isarc_ram;
+    MemoryRegion dsarc_ram;
     uint32_t isarc;
     uint32_t isacntl;
     uint32_t dsarc;
@@ -875,16 +853,15 @@ static void ocm_update_mappings (ppc405_ocm_t *ocm,
         if (ocm->isacntl & 0x80000000) {
             /* Unmap previously assigned memory region */
             printf("OCM unmap ISA %08" PRIx32 "\n", ocm->isarc);
-            cpu_register_physical_memory(ocm->isarc, 0x04000000,
-                                         IO_MEM_UNASSIGNED);
+            memory_region_del_subregion(get_system_memory(), &ocm->isarc_ram);
         }
         if (isacntl & 0x80000000) {
             /* Map new instruction memory region */
 #ifdef DEBUG_OCM
             printf("OCM map ISA %08" PRIx32 "\n", isarc);
 #endif
-            cpu_register_physical_memory(isarc, 0x04000000,
-                                         ocm->offset | IO_MEM_RAM);
+            memory_region_add_subregion(get_system_memory(), isarc,
+                                        &ocm->isarc_ram);
         }
     }
     if (ocm->dsarc != dsarc ||
@@ -896,8 +873,8 @@ static void ocm_update_mappings (ppc405_ocm_t *ocm,
 #ifdef DEBUG_OCM
                 printf("OCM unmap DSA %08" PRIx32 "\n", ocm->dsarc);
 #endif
-                cpu_register_physical_memory(ocm->dsarc, 0x04000000,
-                                             IO_MEM_UNASSIGNED);
+                memory_region_del_subregion(get_system_memory(),
+                                            &ocm->dsarc_ram);
             }
         }
         if (dsacntl & 0x80000000) {
@@ -907,17 +884,17 @@ static void ocm_update_mappings (ppc405_ocm_t *ocm,
 #ifdef DEBUG_OCM
                 printf("OCM map DSA %08" PRIx32 "\n", dsarc);
 #endif
-                cpu_register_physical_memory(dsarc, 0x04000000,
-                                             ocm->offset | IO_MEM_RAM);
+                memory_region_add_subregion(get_system_memory(), dsarc,
+                                            &ocm->dsarc_ram);
             }
         }
     }
 }
 
-static target_ulong dcr_read_ocm (void *opaque, int dcrn)
+static uint32_t dcr_read_ocm (void *opaque, int dcrn)
 {
     ppc405_ocm_t *ocm;
-    target_ulong ret;
+    uint32_t ret;
 
     ocm = opaque;
     switch (dcrn) {
@@ -941,7 +918,7 @@ static target_ulong dcr_read_ocm (void *opaque, int dcrn)
     return ret;
 }
 
-static void dcr_write_ocm (void *opaque, int dcrn, target_ulong val)
+static void dcr_write_ocm (void *opaque, int dcrn, uint32_t val)
 {
     ppc405_ocm_t *ocm;
     uint32_t isarc, dsarc, isacntl, dsacntl;
@@ -989,12 +966,16 @@ static void ocm_reset (void *opaque)
     ocm->dsacntl = dsacntl;
 }
 
-static void ppc405_ocm_init(CPUState *env)
+static void ppc405_ocm_init(CPUPPCState *env)
 {
     ppc405_ocm_t *ocm;
 
-    ocm = qemu_mallocz(sizeof(ppc405_ocm_t));
-    ocm->offset = qemu_ram_alloc(4096);
+    ocm = g_malloc0(sizeof(ppc405_ocm_t));
+    /* XXX: Size is 4096 or 0x04000000 */
+    memory_region_init_ram(&ocm->isarc_ram, "ppc405.ocm", 4096);
+    vmstate_register_ram_global(&ocm->isarc_ram);
+    memory_region_init_alias(&ocm->dsarc_ram, "ppc405.dsarc", &ocm->isarc_ram,
+                             0, 4096);
     qemu_register_reset(&ocm_reset, ocm);
     ppc_dcr_register(env, OCM0_ISARC,
                      ocm, &dcr_read_ocm, &dcr_write_ocm);
@@ -1011,6 +992,7 @@ static void ppc405_ocm_init(CPUState *env)
 typedef struct ppc4xx_i2c_t ppc4xx_i2c_t;
 struct ppc4xx_i2c_t {
     qemu_irq irq;
+    MemoryRegion iomem;
     uint8_t mdata;
     uint8_t lmadr;
     uint8_t hmadr;
@@ -1028,7 +1010,7 @@ struct ppc4xx_i2c_t {
     uint8_t directcntl;
 };
 
-static uint32_t ppc4xx_i2c_readb (void *opaque, target_phys_addr_t addr)
+static uint32_t ppc4xx_i2c_readb (void *opaque, hwaddr addr)
 {
     ppc4xx_i2c_t *i2c;
     uint32_t ret;
@@ -1096,7 +1078,7 @@ static uint32_t ppc4xx_i2c_readb (void *opaque, target_phys_addr_t addr)
 }
 
 static void ppc4xx_i2c_writeb (void *opaque,
-                               target_phys_addr_t addr, uint32_t value)
+                               hwaddr addr, uint32_t value)
 {
     ppc4xx_i2c_t *i2c;
 
@@ -1155,7 +1137,7 @@ static void ppc4xx_i2c_writeb (void *opaque,
     }
 }
 
-static uint32_t ppc4xx_i2c_readw (void *opaque, target_phys_addr_t addr)
+static uint32_t ppc4xx_i2c_readw (void *opaque, hwaddr addr)
 {
     uint32_t ret;
 
@@ -1169,7 +1151,7 @@ static uint32_t ppc4xx_i2c_readw (void *opaque, target_phys_addr_t addr)
 }
 
 static void ppc4xx_i2c_writew (void *opaque,
-                               target_phys_addr_t addr, uint32_t value)
+                               hwaddr addr, uint32_t value)
 {
 #ifdef DEBUG_I2C
     printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
@@ -1179,7 +1161,7 @@ static void ppc4xx_i2c_writew (void *opaque,
     ppc4xx_i2c_writeb(opaque, addr + 1, value);
 }
 
-static uint32_t ppc4xx_i2c_readl (void *opaque, target_phys_addr_t addr)
+static uint32_t ppc4xx_i2c_readl (void *opaque, hwaddr addr)
 {
     uint32_t ret;
 
@@ -1195,7 +1177,7 @@ static uint32_t ppc4xx_i2c_readl (void *opaque, target_phys_addr_t addr)
 }
 
 static void ppc4xx_i2c_writel (void *opaque,
-                               target_phys_addr_t addr, uint32_t value)
+                               hwaddr addr, uint32_t value)
 {
 #ifdef DEBUG_I2C
     printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
@@ -1207,16 +1189,12 @@ static void ppc4xx_i2c_writel (void *opaque,
     ppc4xx_i2c_writeb(opaque, addr + 3, value);
 }
 
-static CPUReadMemoryFunc * const i2c_read[] = {
-    &ppc4xx_i2c_readb,
-    &ppc4xx_i2c_readw,
-    &ppc4xx_i2c_readl,
-};
-
-static CPUWriteMemoryFunc * const i2c_write[] = {
-    &ppc4xx_i2c_writeb,
-    &ppc4xx_i2c_writew,
-    &ppc4xx_i2c_writel,
+static const MemoryRegionOps i2c_ops = {
+    .old_mmio = {
+        .read = { ppc4xx_i2c_readb, ppc4xx_i2c_readw, ppc4xx_i2c_readl, },
+        .write = { ppc4xx_i2c_writeb, ppc4xx_i2c_writew, ppc4xx_i2c_writel, },
+    },
+    .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
 static void ppc4xx_i2c_reset (void *opaque)
@@ -1235,18 +1213,17 @@ static void ppc4xx_i2c_reset (void *opaque)
     i2c->directcntl = 0x0F;
 }
 
-static void ppc405_i2c_init(target_phys_addr_t base, qemu_irq irq)
+static void ppc405_i2c_init(hwaddr base, qemu_irq irq)
 {
     ppc4xx_i2c_t *i2c;
-    int io;
 
-    i2c = qemu_mallocz(sizeof(ppc4xx_i2c_t));
+    i2c = g_malloc0(sizeof(ppc4xx_i2c_t));
     i2c->irq = irq;
 #ifdef DEBUG_I2C
     printf("%s: offset " TARGET_FMT_plx "\n", __func__, base);
 #endif
-    io = cpu_register_io_memory(i2c_read, i2c_write, i2c);
-    cpu_register_physical_memory(base, 0x011, io);
+    memory_region_init_io(&i2c->iomem, &i2c_ops, i2c, "i2c", 0x011);
+    memory_region_add_subregion(get_system_memory(), base, &i2c->iomem);
     qemu_register_reset(ppc4xx_i2c_reset, i2c);
 }
 
@@ -1254,6 +1231,7 @@ static void ppc405_i2c_init(target_phys_addr_t base, qemu_irq irq)
 /* General purpose timers */
 typedef struct ppc4xx_gpt_t ppc4xx_gpt_t;
 struct ppc4xx_gpt_t {
+    MemoryRegion iomem;
     int64_t tb_offset;
     uint32_t tb_freq;
     struct QEMUTimer *timer;
@@ -1267,7 +1245,7 @@ struct ppc4xx_gpt_t {
     uint32_t mask[5];
 };
 
-static uint32_t ppc4xx_gpt_readb (void *opaque, target_phys_addr_t addr)
+static uint32_t ppc4xx_gpt_readb (void *opaque, hwaddr addr)
 {
 #ifdef DEBUG_GPT
     printf("%s: addr " TARGET_FMT_plx "\n", __func__, addr);
@@ -1277,7 +1255,7 @@ static uint32_t ppc4xx_gpt_readb (void *opaque, target_phys_addr_t addr)
 }
 
 static void ppc4xx_gpt_writeb (void *opaque,
-                               target_phys_addr_t addr, uint32_t value)
+                               hwaddr addr, uint32_t value)
 {
 #ifdef DEBUG_I2C
     printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
@@ -1286,7 +1264,7 @@ static void ppc4xx_gpt_writeb (void *opaque,
     /* XXX: generate a bus fault */
 }
 
-static uint32_t ppc4xx_gpt_readw (void *opaque, target_phys_addr_t addr)
+static uint32_t ppc4xx_gpt_readw (void *opaque, hwaddr addr)
 {
 #ifdef DEBUG_GPT
     printf("%s: addr " TARGET_FMT_plx "\n", __func__, addr);
@@ -1296,7 +1274,7 @@ static uint32_t ppc4xx_gpt_readw (void *opaque, target_phys_addr_t addr)
 }
 
 static void ppc4xx_gpt_writew (void *opaque,
-                               target_phys_addr_t addr, uint32_t value)
+                               hwaddr addr, uint32_t value)
 {
 #ifdef DEBUG_I2C
     printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
@@ -1357,7 +1335,7 @@ static void ppc4xx_gpt_compute_timer (ppc4xx_gpt_t *gpt)
     /* XXX: TODO */
 }
 
-static uint32_t ppc4xx_gpt_readl (void *opaque, target_phys_addr_t addr)
+static uint32_t ppc4xx_gpt_readl (void *opaque, hwaddr addr)
 {
     ppc4xx_gpt_t *gpt;
     uint32_t ret;
@@ -1370,7 +1348,7 @@ static uint32_t ppc4xx_gpt_readl (void *opaque, target_phys_addr_t addr)
     switch (addr) {
     case 0x00:
         /* Time base counter */
-        ret = muldiv64(qemu_get_clock(vm_clock) + gpt->tb_offset,
+        ret = muldiv64(qemu_get_clock_ns(vm_clock) + gpt->tb_offset,
                        gpt->tb_freq, get_ticks_per_sec());
         break;
     case 0x10:
@@ -1413,7 +1391,7 @@ static uint32_t ppc4xx_gpt_readl (void *opaque, target_phys_addr_t addr)
 }
 
 static void ppc4xx_gpt_writel (void *opaque,
-                               target_phys_addr_t addr, uint32_t value)
+                               hwaddr addr, uint32_t value)
 {
     ppc4xx_gpt_t *gpt;
     int idx;
@@ -1427,7 +1405,7 @@ static void ppc4xx_gpt_writel (void *opaque,
     case 0x00:
         /* Time base counter */
         gpt->tb_offset = muldiv64(value, get_ticks_per_sec(), gpt->tb_freq)
-            - qemu_get_clock(vm_clock);
+            - qemu_get_clock_ns(vm_clock);
         ppc4xx_gpt_compute_timer(gpt);
         break;
     case 0x10:
@@ -1474,16 +1452,12 @@ static void ppc4xx_gpt_writel (void *opaque,
     }
 }
 
-static CPUReadMemoryFunc * const gpt_read[] = {
-    &ppc4xx_gpt_readb,
-    &ppc4xx_gpt_readw,
-    &ppc4xx_gpt_readl,
-};
-
-static CPUWriteMemoryFunc * const gpt_write[] = {
-    &ppc4xx_gpt_writeb,
-    &ppc4xx_gpt_writew,
-    &ppc4xx_gpt_writel,
+static const MemoryRegionOps gpt_ops = {
+    .old_mmio = {
+        .read = { ppc4xx_gpt_readb, ppc4xx_gpt_readw, ppc4xx_gpt_readl, },
+        .write = { ppc4xx_gpt_writeb, ppc4xx_gpt_writew, ppc4xx_gpt_writel, },
+    },
+    .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
 static void ppc4xx_gpt_cb (void *opaque)
@@ -1514,22 +1488,21 @@ static void ppc4xx_gpt_reset (void *opaque)
     }
 }
 
-static void ppc4xx_gpt_init(target_phys_addr_t base, qemu_irq irqs[5])
+static void ppc4xx_gpt_init(hwaddr base, qemu_irq irqs[5])
 {
     ppc4xx_gpt_t *gpt;
     int i;
-    int io;
 
-    gpt = qemu_mallocz(sizeof(ppc4xx_gpt_t));
+    gpt = g_malloc0(sizeof(ppc4xx_gpt_t));
     for (i = 0; i < 5; i++) {
         gpt->irqs[i] = irqs[i];
     }
-    gpt->timer = qemu_new_timer(vm_clock, &ppc4xx_gpt_cb, gpt);
+    gpt->timer = qemu_new_timer_ns(vm_clock, &ppc4xx_gpt_cb, gpt);
 #ifdef DEBUG_GPT
     printf("%s: offset " TARGET_FMT_plx "\n", __func__, base);
 #endif
-    io = cpu_register_io_memory(gpt_read, gpt_write, gpt);
-    cpu_register_physical_memory(base, 0x0d4, io);
+    memory_region_init_io(&gpt->iomem, &gpt_ops, gpt, "gpt", 0x0d4);
+    memory_region_add_subregion(get_system_memory(), base, &gpt->iomem);
     qemu_register_reset(ppc4xx_gpt_reset, gpt);
 }
 
@@ -1578,10 +1551,10 @@ struct ppc40x_mal_t {
 
 static void ppc40x_mal_reset (void *opaque);
 
-static target_ulong dcr_read_mal (void *opaque, int dcrn)
+static uint32_t dcr_read_mal (void *opaque, int dcrn)
 {
     ppc40x_mal_t *mal;
-    target_ulong ret;
+    uint32_t ret;
 
     mal = opaque;
     switch (dcrn) {
@@ -1650,7 +1623,7 @@ static target_ulong dcr_read_mal (void *opaque, int dcrn)
     return ret;
 }
 
-static void dcr_write_mal (void *opaque, int dcrn, target_ulong val)
+static void dcr_write_mal (void *opaque, int dcrn, uint32_t val)
 {
     ppc40x_mal_t *mal;
     int idx;
@@ -1746,12 +1719,12 @@ static void ppc40x_mal_reset (void *opaque)
     mal->txeobisr = 0x00000000;
 }
 
-static void ppc405_mal_init(CPUState *env, qemu_irq irqs[4])
+static void ppc405_mal_init(CPUPPCState *env, qemu_irq irqs[4])
 {
     ppc40x_mal_t *mal;
     int i;
 
-    mal = qemu_mallocz(sizeof(ppc40x_mal_t));
+    mal = g_malloc0(sizeof(ppc40x_mal_t));
     for (i = 0; i < 4; i++)
         mal->irqs[i] = irqs[i];
     qemu_register_reset(&ppc40x_mal_reset, mal);
@@ -1797,36 +1770,24 @@ static void ppc405_mal_init(CPUState *env, qemu_irq irqs[4])
 
 /*****************************************************************************/
 /* SPR */
-void ppc40x_core_reset (CPUState *env)
+void ppc40x_core_reset (CPUPPCState *env)
 {
     target_ulong dbsr;
 
     printf("Reset PowerPC core\n");
-    env->interrupt_request |= CPU_INTERRUPT_EXITTB;
-    /* XXX: TOFIX */
-#if 0
-    cpu_reset(env);
-#else
-    qemu_system_reset_request();
-#endif
+    cpu_interrupt(env, CPU_INTERRUPT_RESET);
     dbsr = env->spr[SPR_40x_DBSR];
     dbsr &= ~0x00000300;
     dbsr |= 0x00000100;
     env->spr[SPR_40x_DBSR] = dbsr;
 }
 
-void ppc40x_chip_reset (CPUState *env)
+void ppc40x_chip_reset (CPUPPCState *env)
 {
     target_ulong dbsr;
 
     printf("Reset PowerPC chip\n");
-    env->interrupt_request |= CPU_INTERRUPT_EXITTB;
-    /* XXX: TOFIX */
-#if 0
-    cpu_reset(env);
-#else
-    qemu_system_reset_request();
-#endif
+    cpu_interrupt(env, CPU_INTERRUPT_RESET);
     /* XXX: TODO reset all internal peripherals */
     dbsr = env->spr[SPR_40x_DBSR];
     dbsr &= ~0x00000300;
@@ -1834,13 +1795,13 @@ void ppc40x_chip_reset (CPUState *env)
     env->spr[SPR_40x_DBSR] = dbsr;
 }
 
-void ppc40x_system_reset (CPUState *env)
+void ppc40x_system_reset (CPUPPCState *env)
 {
     printf("Reset PowerPC system\n");
     qemu_system_reset_request();
 }
 
-void store_40x_dbcr0 (CPUState *env, uint32_t val)
+void store_40x_dbcr0 (CPUPPCState *env, uint32_t val)
 {
     switch ((val >> 28) & 0x3) {
     case 0x0:
@@ -1951,10 +1912,10 @@ static void ppc405cr_clk_setup (ppc405cr_cpc_t *cpc)
     clk_setup(&cpc->clk_setup[PPC405CR_UART_CLK], UART_clk);
 }
 
-static target_ulong dcr_read_crcpc (void *opaque, int dcrn)
+static uint32_t dcr_read_crcpc (void *opaque, int dcrn)
 {
     ppc405cr_cpc_t *cpc;
-    target_ulong ret;
+    uint32_t ret;
 
     cpc = opaque;
     switch (dcrn) {
@@ -1991,7 +1952,7 @@ static target_ulong dcr_read_crcpc (void *opaque, int dcrn)
     return ret;
 }
 
-static void dcr_write_crcpc (void *opaque, int dcrn, target_ulong val)
+static void dcr_write_crcpc (void *opaque, int dcrn, uint32_t val)
 {
     ppc405cr_cpc_t *cpc;
 
@@ -2111,12 +2072,12 @@ static void ppc405cr_clk_init (ppc405cr_cpc_t *cpc)
     cpc->psr |= D << 17;
 }
 
-static void ppc405cr_cpc_init (CPUState *env, clk_setup_t clk_setup[7],
+static void ppc405cr_cpc_init (CPUPPCState *env, clk_setup_t clk_setup[7],
                                uint32_t sysclk)
 {
     ppc405cr_cpc_t *cpc;
 
-    cpc = qemu_mallocz(sizeof(ppc405cr_cpc_t));
+    cpc = g_malloc0(sizeof(ppc405cr_cpc_t));
     memcpy(cpc->clk_setup, clk_setup,
            PPC405CR_CLK_NB * sizeof(clk_setup_t));
     cpc->sysclk = sysclk;
@@ -2141,14 +2102,16 @@ static void ppc405cr_cpc_init (CPUState *env, clk_setup_t clk_setup[7],
     qemu_register_reset(ppc405cr_cpc_reset, cpc);
 }
 
-CPUState *ppc405cr_init (target_phys_addr_t ram_bases[4],
-                         target_phys_addr_t ram_sizes[4],
-                         uint32_t sysclk, qemu_irq **picp,
-                         int do_init)
+CPUPPCState *ppc405cr_init(MemoryRegion *address_space_mem,
+                        MemoryRegion ram_memories[4],
+                        hwaddr ram_bases[4],
+                        hwaddr ram_sizes[4],
+                        uint32_t sysclk, qemu_irq **picp,
+                        int do_init)
 {
     clk_setup_t clk_setup[PPC405CR_CLK_NB];
     qemu_irq dma_irqs[4];
-    CPUState *env;
+    CPUPPCState *env;
     qemu_irq *pic, *irqs;
 
     memset(clk_setup, 0, sizeof(clk_setup));
@@ -2162,7 +2125,7 @@ CPUState *ppc405cr_init (target_phys_addr_t ram_bases[4],
     /* OBP arbitrer */
     ppc4xx_opba_init(0xef600600);
     /* Universal interrupt controller */
-    irqs = qemu_mallocz(sizeof(qemu_irq) * PPCUIC_OUTPUT_NB);
+    irqs = g_malloc0(sizeof(qemu_irq) * PPCUIC_OUTPUT_NB);
     irqs[PPCUIC_OUTPUT_INT] =
         ((qemu_irq *)env->irq_inputs)[PPC40x_INPUT_INT];
     irqs[PPCUIC_OUTPUT_CINT] =
@@ -2170,7 +2133,8 @@ CPUState *ppc405cr_init (target_phys_addr_t ram_bases[4],
     pic = ppcuic_init(env, irqs, 0x0C0, 0, 1);
     *picp = pic;
     /* SDRAM controller */
-    ppc4xx_sdram_init(env, pic[14], 1, ram_bases, ram_sizes, do_init);
+    ppc4xx_sdram_init(env, pic[14], 1, ram_memories,
+                      ram_bases, ram_sizes, do_init);
     /* External bus controller */
     ppc405_ebc_init(env);
     /* DMA controller */
@@ -2181,12 +2145,14 @@ CPUState *ppc405cr_init (target_phys_addr_t ram_bases[4],
     ppc405_dma_init(env, dma_irqs);
     /* Serial ports */
     if (serial_hds[0] != NULL) {
-        serial_mm_init(0xef600300, 0, pic[0], PPC_SERIAL_MM_BAUDBASE,
-                       serial_hds[0], 1);
+        serial_mm_init(address_space_mem, 0xef600300, 0, pic[0],
+                       PPC_SERIAL_MM_BAUDBASE, serial_hds[0],
+                       DEVICE_BIG_ENDIAN);
     }
     if (serial_hds[1] != NULL) {
-        serial_mm_init(0xef600400, 0, pic[1], PPC_SERIAL_MM_BAUDBASE,
-                       serial_hds[1], 1);
+        serial_mm_init(address_space_mem, 0xef600400, 0, pic[1],
+                       PPC_SERIAL_MM_BAUDBASE, serial_hds[1],
+                       DEVICE_BIG_ENDIAN);
     }
     /* IIC controller */
     ppc405_i2c_init(0xef600500, pic[2]);
@@ -2353,10 +2319,10 @@ static void ppc405ep_compute_clocks (ppc405ep_cpc_t *cpc)
     clk_setup(&cpc->clk_setup[PPC405EP_UART1_CLK], UART1_clk);
 }
 
-static target_ulong dcr_read_epcpc (void *opaque, int dcrn)
+static uint32_t dcr_read_epcpc (void *opaque, int dcrn)
 {
     ppc405ep_cpc_t *cpc;
-    target_ulong ret;
+    uint32_t ret;
 
     cpc = opaque;
     switch (dcrn) {
@@ -2393,7 +2359,7 @@ static target_ulong dcr_read_epcpc (void *opaque, int dcrn)
     return ret;
 }
 
-static void dcr_write_epcpc (void *opaque, int dcrn, target_ulong val)
+static void dcr_write_epcpc (void *opaque, int dcrn, uint32_t val)
 {
     ppc405ep_cpc_t *cpc;
 
@@ -2448,12 +2414,12 @@ static void ppc405ep_cpc_reset (void *opaque)
 }
 
 /* XXX: sysclk should be between 25 and 100 MHz */
-static void ppc405ep_cpc_init (CPUState *env, clk_setup_t clk_setup[8],
+static void ppc405ep_cpc_init (CPUPPCState *env, clk_setup_t clk_setup[8],
                                uint32_t sysclk)
 {
     ppc405ep_cpc_t *cpc;
 
-    cpc = qemu_mallocz(sizeof(ppc405ep_cpc_t));
+    cpc = g_malloc0(sizeof(ppc405ep_cpc_t));
     memcpy(cpc->clk_setup, clk_setup,
            PPC405EP_CLK_NB * sizeof(clk_setup_t));
     cpc->jtagid = 0x20267049;
@@ -2485,14 +2451,16 @@ static void ppc405ep_cpc_init (CPUState *env, clk_setup_t clk_setup[8],
 #endif
 }
 
-CPUState *ppc405ep_init (target_phys_addr_t ram_bases[2],
-                         target_phys_addr_t ram_sizes[2],
-                         uint32_t sysclk, qemu_irq **picp,
-                         int do_init)
+CPUPPCState *ppc405ep_init(MemoryRegion *address_space_mem,
+                        MemoryRegion ram_memories[2],
+                        hwaddr ram_bases[2],
+                        hwaddr ram_sizes[2],
+                        uint32_t sysclk, qemu_irq **picp,
+                        int do_init)
 {
     clk_setup_t clk_setup[PPC405EP_CLK_NB], tlb_clk_setup;
     qemu_irq dma_irqs[4], gpt_irqs[5], mal_irqs[4];
-    CPUState *env;
+    CPUPPCState *env;
     qemu_irq *pic, *irqs;
 
     memset(clk_setup, 0, sizeof(clk_setup));
@@ -2509,8 +2477,10 @@ CPUState *ppc405ep_init (target_phys_addr_t ram_bases[2],
     ppc4xx_pob_init(env);
     /* OBP arbitrer */
     ppc4xx_opba_init(0xef600600);
+    /* Initialize timers */
+    ppc_booke_timers_init(env, sysclk, 0);
     /* Universal interrupt controller */
-    irqs = qemu_mallocz(sizeof(qemu_irq) * PPCUIC_OUTPUT_NB);
+    irqs = g_malloc0(sizeof(qemu_irq) * PPCUIC_OUTPUT_NB);
     irqs[PPCUIC_OUTPUT_INT] =
         ((qemu_irq *)env->irq_inputs)[PPC40x_INPUT_INT];
     irqs[PPCUIC_OUTPUT_CINT] =
@@ -2519,7 +2489,8 @@ CPUState *ppc405ep_init (target_phys_addr_t ram_bases[2],
     *picp = pic;
     /* SDRAM controller */
 	/* XXX 405EP has no ECC interrupt */
-    ppc4xx_sdram_init(env, pic[17], 2, ram_bases, ram_sizes, do_init);
+    ppc4xx_sdram_init(env, pic[17], 2, ram_memories,
+                      ram_bases, ram_sizes, do_init);
     /* External bus controller */
     ppc405_ebc_init(env);
     /* DMA controller */
@@ -2534,12 +2505,14 @@ CPUState *ppc405ep_init (target_phys_addr_t ram_bases[2],
     ppc405_gpio_init(0xef600700);
     /* Serial ports */
     if (serial_hds[0] != NULL) {
-        serial_mm_init(0xef600300, 0, pic[0], PPC_SERIAL_MM_BAUDBASE,
-                       serial_hds[0], 1);
+        serial_mm_init(address_space_mem, 0xef600300, 0, pic[0],
+                       PPC_SERIAL_MM_BAUDBASE, serial_hds[0],
+                       DEVICE_BIG_ENDIAN);
     }
     if (serial_hds[1] != NULL) {
-        serial_mm_init(0xef600400, 0, pic[1], PPC_SERIAL_MM_BAUDBASE,
-                       serial_hds[1], 1);
+        serial_mm_init(address_space_mem, 0xef600400, 0, pic[1],
+                       PPC_SERIAL_MM_BAUDBASE, serial_hds[1],
+                       DEVICE_BIG_ENDIAN);
     }
     /* OCM */
     ppc405_ocm_init(env);

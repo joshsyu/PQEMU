@@ -48,7 +48,7 @@ static int fifo_size;
 static void transfer_fifo2fifo(struct soc_dma_ch_s *ch)
 {
     if (ch->bytes > fifo_size)
-        fifo_buf = qemu_realloc(fifo_buf, fifo_size = ch->bytes);
+        fifo_buf = g_realloc(fifo_buf, fifo_size = ch->bytes);
 
     /* Implement as transfer_fifo2linear + transfer_linear2fifo.  */
     ch->io_fn[0](ch->io_opaque[0], fifo_buf, ch->bytes);
@@ -64,7 +64,7 @@ struct dma_s {
 
     struct memmap_entry_s {
         enum soc_dma_port_type type;
-        target_phys_addr_t addr;
+        hwaddr addr;
         union {
            struct {
                void *opaque;
@@ -84,7 +84,7 @@ struct dma_s {
 
 static void soc_dma_ch_schedule(struct soc_dma_ch_s *ch, int delay_bytes)
 {
-    int64_t now = qemu_get_clock(vm_clock);
+    int64_t now = qemu_get_clock_ns(vm_clock);
     struct dma_s *dma = (struct dma_s *) ch->dma;
 
     qemu_mod_timer(ch->timer, now + delay_bytes / dma->channel_freq);
@@ -105,7 +105,7 @@ static void soc_dma_ch_run(void *opaque)
 }
 
 static inline struct memmap_entry_s *soc_dma_lookup(struct dma_s *dma,
-                target_phys_addr_t addr)
+                hwaddr addr)
 {
     struct memmap_entry_s *lo;
     int hi;
@@ -192,12 +192,13 @@ static void soc_dma_ch_freq_update(struct dma_s *s)
     if (s->enabled_count)
         /* We completely ignore channel priorities and stuff */
         s->channel_freq = s->soc.freq / s->enabled_count;
-    else
+    else {
         /* TODO: Signal that we want to disable the functional clock and let
          * the platform code decide what to do with it, i.e. check that
          * auto-idle is enabled in the clock controller and if we are stopping
          * the clock, do the same with any parent clocks that had only one
-         * user keeping them on and auto-idle enabled.  */;
+         * user keeping them on and auto-idle enabled.  */
+    }
 }
 
 void soc_dma_set_request(struct soc_dma_ch_s *ch, int level)
@@ -238,14 +239,14 @@ void soc_dma_reset(struct soc_dma_s *soc)
 struct soc_dma_s *soc_dma_init(int n)
 {
     int i;
-    struct dma_s *s = qemu_mallocz(sizeof(*s) + n * sizeof(*s->ch));
+    struct dma_s *s = g_malloc0(sizeof(*s) + n * sizeof(*s->ch));
 
     s->chnum = n;
     s->soc.ch = s->ch;
     for (i = 0; i < n; i ++) {
         s->ch[i].dma = &s->soc;
         s->ch[i].num = i;
-        s->ch[i].timer = qemu_new_timer(vm_clock, soc_dma_ch_run, &s->ch[i]);
+        s->ch[i].timer = qemu_new_timer_ns(vm_clock, soc_dma_ch_run, &s->ch[i]);
     }
 
     soc_dma_reset(&s->soc);
@@ -254,13 +255,13 @@ struct soc_dma_s *soc_dma_init(int n)
     return &s->soc;
 }
 
-void soc_dma_port_add_fifo(struct soc_dma_s *soc, target_phys_addr_t virt_base,
+void soc_dma_port_add_fifo(struct soc_dma_s *soc, hwaddr virt_base,
                 soc_dma_io_t fn, void *opaque, int out)
 {
     struct memmap_entry_s *entry;
     struct dma_s *dma = (struct dma_s *) soc;
 
-    dma->memmap = qemu_realloc(dma->memmap, sizeof(*entry) *
+    dma->memmap = g_realloc(dma->memmap, sizeof(*entry) *
                     (dma->memmap_size + 1));
     entry = soc_dma_lookup(dma, virt_base);
 
@@ -307,12 +308,12 @@ void soc_dma_port_add_fifo(struct soc_dma_s *soc, target_phys_addr_t virt_base,
 }
 
 void soc_dma_port_add_mem(struct soc_dma_s *soc, uint8_t *phys_base,
-                target_phys_addr_t virt_base, size_t size)
+                hwaddr virt_base, size_t size)
 {
     struct memmap_entry_s *entry;
     struct dma_s *dma = (struct dma_s *) soc;
 
-    dma->memmap = qemu_realloc(dma->memmap, sizeof(*entry) *
+    dma->memmap = g_realloc(dma->memmap, sizeof(*entry) *
                     (dma->memmap_size + 1));
     entry = soc_dma_lookup(dma, virt_base);
 

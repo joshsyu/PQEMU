@@ -40,10 +40,23 @@ struct int13ext_s {
     u64 lba;
 } PACKED;
 
-#define GET_INT13EXT(regs,var)                                          \
-    GET_FARVAR((regs)->ds, ((struct int13ext_s*)((regs)->si+0))->var)
-#define SET_INT13EXT(regs,var,val)                                      \
-    SET_FARVAR((regs)->ds, ((struct int13ext_s*)((regs)->si+0))->var, (val))
+// DPTE definition
+struct dpte_s {
+    u16 iobase1;
+    u16 iobase2;
+    u8  prefix;
+    u8  unused;
+    u8  irq;
+    u8  blkcount;
+    u8  dma;
+    u8  pio;
+    u16 options;
+    u16 reserved;
+    u8  revision;
+    u8  checksum;
+};
+
+extern struct dpte_s DefaultDPTE;
 
 // Disk Physical Table definition
 struct int13dpt_s {
@@ -54,8 +67,7 @@ struct int13dpt_s {
     u32 spt;
     u64 sector_count;
     u16 blksize;
-    u16 dpte_offset;
-    u16 dpte_segment;
+    struct segoff_s dpte;
     u16 key;
     u8  dpi_length;
     u8  reserved1;
@@ -63,15 +75,19 @@ struct int13dpt_s {
     u8  host_bus[4];
     u8  iface_type[8];
     u64 iface_path;
-    u64 device_path;
-    u8  reserved3;
-    u8  checksum;
+    union {
+        struct {
+            u64 device_path;
+            u8  reserved3;
+            u8  checksum;
+        } phoenix;
+        struct {
+            u64 device_path[2];
+            u8  reserved3;
+            u8  checksum;
+        } t13;
+    };
 } PACKED;
-
-#define GET_INT13DPT(regs,var)                                          \
-    GET_FARVAR((regs)->ds, ((struct int13dpt_s*)((regs)->si+0))->var)
-#define SET_INT13DPT(regs,var,val)                                      \
-    SET_FARVAR((regs)->ds, ((struct int13dpt_s*)((regs)->si+0))->var, (val))
 
 // Floppy "Disk Base Table"
 struct floppy_dbt_s {
@@ -170,50 +186,63 @@ struct chs_s {
     u16 heads;      // # heads
     u16 cylinders;  // # cylinders
     u16 spt;        // # sectors / track
+    u16 pad;
+};
+
+// ElTorito Device Emulation data
+struct cdemu_s {
+    struct drive_s *emulated_drive_gf;
+    u32 ilba;
+    u16 buffer_segment;
+    u16 load_segment;
+    u16 sector_count;
+    u8  active;
+    u8  media;
+    u8  emulated_extdrive;
+
+    // Virtual device
+    struct chs_s lchs;
 };
 
 struct drive_s {
-    u8  type;         // Detected type of drive (ata/atapi/none)
-    u8  removable;    // Removable device flag
-    u16 blksize;      // block size
-    u32 cntl_id;
-    u32 cntl_info;
-    u8  floppy_type;  // Type of floppy (only for floppy drives).
+    u8 type;            // Driver type (DTYPE_*)
+    u8 floppy_type;     // Type of floppy (only for floppy drives).
+    struct chs_s lchs;  // Logical CHS
+    u64 sectors;        // Total sectors count
+    u32 cntl_id;        // Unique id for a given driver type.
+    u8 removable;       // Is media removable (currently unused)
 
-    char model[41];
-
-    u8  translation;  // type of translation
-    struct chs_s  lchs;         // Logical CHS
-    struct chs_s  pchs;         // Physical CHS
-
-    u64 sectors;      // Total sectors count
+    // Info for EDD calls
+    u8 translation;     // type of translation
+    u16 blksize;        // block size
+    struct chs_s pchs;  // Physical CHS
 };
 
 #define DISK_SECTOR_SIZE  512
 #define CDROM_SECTOR_SIZE 2048
 
-#define DTYPE_NONE     0x00
-#define DTYPE_FLOPPY   0x01
-#define DTYPE_ATA      0x02
-#define DTYPE_ATAPI    0x03
-#define DTYPE_RAMDISK  0x04
-#define DTYPE_CDEMU    0x05
+#define DTYPE_NONE         0x00
+#define DTYPE_FLOPPY       0x01
+#define DTYPE_ATA          0x02
+#define DTYPE_ATA_ATAPI    0x03
+#define DTYPE_RAMDISK      0x04
+#define DTYPE_CDEMU        0x05
+#define DTYPE_AHCI         0x06
+#define DTYPE_AHCI_ATAPI   0x07
+#define DTYPE_VIRTIO_SCSI  0x08
+#define DTYPE_VIRTIO_BLK   0x09
+#define DTYPE_USB          0x0a
+#define DTYPE_UAS          0x0b
+#define DTYPE_LSI_SCSI     0x0c
+#define DTYPE_ESP_SCSI     0x0d
+#define DTYPE_MEGASAS      0x0e
+
+#define MAXDESCSIZE 80
 
 #define TRANSLATION_NONE  0
 #define TRANSLATION_LBA   1
 #define TRANSLATION_LARGE 2
 #define TRANSLATION_RECHS 3
-
-struct drives_s {
-    // info on each internally handled drive
-    struct drive_s drives[CONFIG_MAX_DRIVES];
-    u8 drivecount;
-    //
-    // map between bios floppy/hd/cd id and driveid index into drives[]
-    u8 floppycount;
-    u8 cdcount;
-    u8 idmap[3][CONFIG_MAX_EXTDRIVE];
-};
 
 #define EXTTYPE_FLOPPY 0
 #define EXTTYPE_HD 1
@@ -228,37 +257,36 @@ struct drives_s {
  ****************************************************************/
 
 // block.c
-extern struct drives_s Drives;
+extern u8 FloppyCount, CDCount;
+extern u8 *bounce_buf_fl;
 struct drive_s *getDrive(u8 exttype, u8 extdriveoffset);
-struct drive_s *allocDrive();
-void setup_translation(struct drive_s *drive_g);
+int getDriveId(u8 exttype, struct drive_s *drive_g);
 void map_floppy_drive(struct drive_s *drive_g);
 void map_hd_drive(struct drive_s *drive_g);
 void map_cd_drive(struct drive_s *drive_g);
-void describe_drive(struct drive_s *drive_g);
 int process_op(struct disk_op_s *op);
 int send_disk_op(struct disk_op_s *op);
-void drive_setup();
+int bounce_buf_init(void);
 
 // floppy.c
 extern struct floppy_ext_dbt_s diskette_param_table2;
-void floppy_setup();
-struct drive_s *addFloppy(int floppyid, int ftype, int driver);
-void describe_floppy(struct drive_s *drive_g);
+void floppy_setup(void);
+struct drive_s *init_floppy(int floppyid, int ftype);
 int find_floppy_type(u32 size);
 int process_floppy_op(struct disk_op_s *op);
-void floppy_tick();
+void floppy_tick(void);
 
 // cdrom.c
-extern struct drive_s *cdemu_drive;
+extern u8 CDRom_locks[];
+extern struct cdemu_s CDEmu;
+extern struct drive_s *cdemu_drive_gf;
 int process_cdemu_op(struct disk_op_s *op);
-void cdemu_setup();
+void cdemu_setup(void);
 void cdemu_134b(struct bregs *regs);
-int cdrom_boot(int cdid);
+int cdrom_boot(struct drive_s *drive_g);
 
 // ramdisk.c
-void describe_ramdisk(struct drive_s *drive_g);
-void ramdisk_setup();
+void ramdisk_setup(void);
 int process_ramdisk_op(struct disk_op_s *op);
 
 #endif // disk.h

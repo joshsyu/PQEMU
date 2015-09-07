@@ -20,24 +20,18 @@
 
 #ifndef CONFIG_USER_ONLY
 
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-
-#include "config.h"
 #include "cpu.h"
 #include "mmu.h"
-#include "exec-all.h"
 
 #ifdef DEBUG
 #define D(x) x
-#define D_LOG(...) qemu_log(__VA__ARGS__)
+#define D_LOG(...) qemu_log(__VA_ARGS__)
 #else
-#define D(x)
+#define D(x) do { } while (0)
 #define D_LOG(...) do { } while (0)
 #endif
 
-void cris_mmu_init(CPUState *env)
+void cris_mmu_init(CPUCRISState *env)
 {
 	env->mmu_rand_lfsr = 0xcccc;
 }
@@ -55,6 +49,17 @@ static inline unsigned int compute_polynom(unsigned int sr)
 	return f;
 }
 
+static void cris_mmu_update_rand_lfsr(CPUCRISState *env)
+{
+	unsigned int f;
+
+	/* Update lfsr at every fault.  */
+	f = compute_polynom(env->mmu_rand_lfsr);
+	env->mmu_rand_lfsr >>= 1;
+	env->mmu_rand_lfsr |= (f << 15);
+	env->mmu_rand_lfsr &= 0xffff;
+}
+
 static inline int cris_mmu_enabled(uint32_t rw_gc_cfg)
 {
 	return (rw_gc_cfg & 12) != 0;
@@ -65,7 +70,7 @@ static inline int cris_mmu_segmented_addr(int seg, uint32_t rw_mm_cfg)
 	return (1 << seg) & rw_mm_cfg;
 }
 
-static uint32_t cris_mmu_translate_seg(CPUState *env, int seg)
+static uint32_t cris_mmu_translate_seg(CPUCRISState *env, int seg)
 {
 	uint32_t base;
 	int i;
@@ -101,7 +106,7 @@ static inline void set_field(uint32_t *dst, unsigned int val,
 }
 
 #ifdef DEBUG
-static void dump_tlb(CPUState *env, int mmu)
+static void dump_tlb(CPUCRISState *env, int mmu)
 {
 	int set;
 	int idx;
@@ -123,8 +128,8 @@ static void dump_tlb(CPUState *env, int mmu)
 
 /* rw 0 = read, 1 = write, 2 = exec.  */
 static int cris_mmu_translate_page(struct cris_mmu_result *res,
-				   CPUState *env, uint32_t vaddr,
-				   int rw, int usermode)
+				   CPUCRISState *env, uint32_t vaddr,
+				   int rw, int usermode, int debug)
 {
 	unsigned int vpage;
 	unsigned int idx;
@@ -240,7 +245,7 @@ static int cris_mmu_translate_page(struct cris_mmu_result *res,
 			res->prot |= PAGE_READ;
 			if (tlb_w)
 				res->prot |= PAGE_WRITE;
-			if (tlb_x)
+			if (mmu == 0 && (cfg_x || tlb_x))
 				res->prot |= PAGE_EXEC;
 		}
 		else
@@ -250,15 +255,9 @@ static int cris_mmu_translate_page(struct cris_mmu_result *res,
 		set = env->mmu_rand_lfsr & 3;
 	}
 
-	if (!match) {
-		unsigned int f;
+	if (!match && !debug) {
+		cris_mmu_update_rand_lfsr(env);
 
-		/* Update lfsr at every fault.  */
-		f = compute_polynom(env->mmu_rand_lfsr);
-		env->mmu_rand_lfsr >>= 1;
-		env->mmu_rand_lfsr |= (f << 15);
-		env->mmu_rand_lfsr &= 0xffff;
-		
 		/* Compute index.  */
 		idx = vpage & 15;
 
@@ -289,7 +288,7 @@ static int cris_mmu_translate_page(struct cris_mmu_result *res,
 	return !match;
 }
 
-void cris_mmu_flush_pid(CPUState *env, uint32_t pid)
+void cris_mmu_flush_pid(CPUCRISState *env, uint32_t pid)
 {
 	target_ulong vaddr;
 	unsigned int idx;
@@ -324,10 +323,9 @@ void cris_mmu_flush_pid(CPUState *env, uint32_t pid)
 }
 
 int cris_mmu_translate(struct cris_mmu_result *res,
-		       CPUState *env, uint32_t vaddr,
-		       int rw, int mmu_idx)
+		       CPUCRISState *env, uint32_t vaddr,
+		       int rw, int mmu_idx, int debug)
 {
-	uint32_t phy = vaddr;
 	int seg;
 	int miss = 0;
 	int is_user = mmu_idx == MMU_USER_IDX;
@@ -351,12 +349,12 @@ int cris_mmu_translate(struct cris_mmu_result *res,
 
 		miss = 0;
 		base = cris_mmu_translate_seg(env, seg);
-		phy = base | (0x0fffffff & vaddr);
-		res->phy = phy;
+                res->phy = base | (0x0fffffff & vaddr);
 		res->prot = PAGE_BITS;
+	} else {
+		miss = cris_mmu_translate_page(res, env, vaddr, rw,
+					       is_user, debug);
 	}
-	else
-		miss = cris_mmu_translate_page(res, env, vaddr, rw, is_user);
   done:
 	env->pregs[PR_SRS] = old_srs;
 	return miss;

@@ -20,6 +20,8 @@
  * THE SOFTWARE.
  */
 
+#include "memory.h"
+
 typedef struct DBDMA_io DBDMA_io;
 
 typedef void (*DBDMA_flush)(DBDMA_io *io);
@@ -28,7 +30,7 @@ typedef void (*DBDMA_end)(DBDMA_io *io);
 struct DBDMA_io {
     void *opaque;
     void *channel;
-    target_phys_addr_t addr;
+    hwaddr addr;
     int len;
     int is_last;
     int is_dma_out;
@@ -39,5 +41,4 @@ struct DBDMA_io {
 void DBDMA_register_channel(void *dbdma, int nchan, qemu_irq irq,
                             DBDMA_rw rw, DBDMA_flush flush,
                             void *opaque);
-void DBDMA_schedule(void);
-void* DBDMA_init (int *dbdma_mem_index);
+void* DBDMA_init (MemoryRegion **dbdma_mem);
